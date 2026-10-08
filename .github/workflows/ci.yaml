@@ -63,8 +63,8 @@ jobs:
     name: HACS validation
     runs-on: ubuntu-latest
     # HACS downloads hacs.json and manifest.json from raw.githubusercontent.com without
-    # credentials, which 404s on a private repository. Advisory until the repo is public.
-    continue-on-error: ${{ github.event.repository.private }}
+    # credentials, which 404s on a private repository. Skipped until the repo is public.
+    if: ${{ !github.event.repository.private }}
     steps:
       - uses: actions/checkout@v4
       - uses: hacs/action@main
