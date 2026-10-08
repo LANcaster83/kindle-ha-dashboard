@@ -1,10 +1,10 @@
 {
   "domain": "kindle_dashboard",
   "name": "Kindle Dashboard",
+  "after_dependencies": ["hassio"],
   "codeowners": ["@LANcaster83"],
   "config_flow": true,
   "dependencies": ["http"],
-  "after_dependencies": ["hassio"],
   "documentation": "https://github.com/LANcaster83/kindle-ha-dashboard",
   "integration_type": "device",
   "iot_class": "local_polling",

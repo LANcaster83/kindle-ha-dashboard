@@ -11,7 +11,7 @@
           "device_token": "Device token for the Kindle"
         },
         "data_description": {
-          "addon_url": "Base URL of the renderer app, e.g. http://local-kindledash:8080 or http://<hash>-kindledash:8080.",
+          "addon_url": "Base URL of the renderer app, e.g. http://local-kindledash:8080 or http://HASH-kindledash:8080.",
           "device_token": "Generated for you; copy it to the Kindle. At least 8 characters."
         }
       }

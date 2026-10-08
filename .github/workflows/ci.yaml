@@ -65,9 +65,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: hacs/action@main
+        env:
+          # The default ref lookup breaks on branch names containing slashes; pin the commit.
+          REPOSITORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
           category: integration
-          ignore: brands
+          # GitHub only detects the license on the default branch, so skip that check on PRs.
+          ignore: ${{ github.event_name == 'pull_request' && 'brands license' || 'brands' }}
 
   shellcheck:
     name: Kindle scripts (shellcheck)
