@@ -1,0 +1,67 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Połącz z rendererem Kindle Dashboard",
+        "description": "Renderer to aplikacja (add-on) *Kindle Dashboard Renderer*. Token urządzenia wpisujesz w `config.sh` na Kindle; chroni on `{image_path}` i `{status_path}`.",
+        "data": {
+          "device_name": "Nazwa urządzenia",
+          "addon_url": "Adres renderera",
+          "addon_token": "Token serwera renderera (jeśli ustawiony w opcjach aplikacji)",
+          "device_token": "Token urządzenia dla Kindle"
+        },
+        "data_description": {
+          "addon_url": "Bazowy adres aplikacji renderera, np. http://local-kindledash:8080 lub http://<hash>-kindledash:8080.",
+          "device_token": "Wygenerowany automatycznie; skopiuj go na Kindle. Co najmniej 8 znaków."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nie można połączyć się z rendererem pod tym adresem.",
+      "invalid_auth": "Renderer odrzucił token serwera.",
+      "invalid_url": "Adres musi zaczynać się od http:// lub https://.",
+      "token_too_short": "Użyj co najmniej 8 znaków."
+    },
+    "abort": {
+      "already_configured": "Ten renderer jest już skonfigurowany."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje Kindle Dashboard",
+        "data": {
+          "addon_url": "Adres renderera",
+          "addon_token": "Token serwera renderera",
+          "device_token": "Token urządzenia dla Kindle"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nie można połączyć się z rendererem pod tym adresem.",
+      "invalid_auth": "Renderer odrzucił token serwera.",
+      "invalid_url": "Adres musi zaczynać się od http:// lub https://.",
+      "token_too_short": "Użyj co najmniej 8 znaków."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": { "name": "Bateria" },
+      "last_seen": { "name": "Ostatnio widziany" },
+      "last_render": { "name": "Ostatni render" },
+      "renderer_status": {
+        "name": "Stan renderera",
+        "state": { "ok": "OK", "error": "Błąd", "offline": "Offline" }
+      }
+    },
+    "button": {
+      "render_now": { "name": "Renderuj teraz" }
+    }
+  },
+  "services": {
+    "render": {
+      "name": "Renderuj teraz",
+      "description": "Poproś renderer kindledash o natychmiastowe wygenerowanie nowego obrazu."
+    }
+  }
+}

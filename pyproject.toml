@@ -1,0 +1,38 @@
+[project]
+name = "kindle-ha-dashboard"
+version = "0.1.0"
+description = "Home Assistant dashboard for a jailbroken Kindle: renderer app, HACS integration and KUAL extension."
+readme = "README.md"
+requires-python = ">=3.13.2"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest-homeassistant-custom-component>=0.13.300",
+    "ruff>=0.14",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+extend-exclude = ["addon", "kindle", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ASYNC", "PL"]
+ignore = ["PLR0913", "PLR2004", "RUF012"]
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-first-party = ["custom_components.kindle_dashboard"]
+combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR0915", "S101"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-p no:cacheprovider -q"

@@ -1,0 +1,57 @@
+configuration:
+  ha_url:
+    name: Home Assistant URL
+    description: Base URL of the Home Assistant frontend as reachable from the app. Keep the default on HAOS.
+  access_token:
+    name: Long-lived access token
+    description: Created under your HA profile -> Security. Used by the headless browser to log in.
+  dashboard_path:
+    name: Dashboard path
+    description: Lovelace dashboard path to render, e.g. /dashboard-test-2 or /lovelace/0.
+  url_query:
+    name: URL query
+    description: Optional query string appended to the dashboard URL, e.g. ?kiosk.
+  width:
+    name: Width
+    description: Rendered width in pixels (Kindle Oasis portrait = 1264).
+  height:
+    name: Height
+    description: Rendered height in pixels (Kindle Oasis portrait = 1680).
+  rotation:
+    name: Rotation
+    description: Rotate the final image clockwise by this many degrees.
+  zoom:
+    name: Zoom
+    description: CSS zoom applied to the dashboard (1.0 = 100%).
+  interval:
+    name: Render interval (s)
+    description: How often the dashboard is re-rendered.
+  render_delay_ms:
+    name: Render delay (ms)
+    description: Extra wait after the page loaded so cards finish drawing.
+  color_scheme:
+    name: Color scheme
+    description: Preferred color scheme emulated in the browser.
+  theme:
+    name: Theme
+    description: Optional HA theme name to select.
+  language:
+    name: Language
+    description: Optional UI language code (e.g. pl, en).
+  hide_header:
+    name: Hide header and sidebar
+    description: Hide the Lovelace toolbar and dock the sidebar away.
+  gray_levels:
+    name: Gray levels
+    description: Number of gray levels in the output (Kindle e-ink shows 16).
+  dither:
+    name: Dither
+    description: Apply Floyd-Steinberg dithering when reducing gray levels.
+  contrast:
+    name: Contrast
+    description: Contrast multiplier applied before quantisation (1.0 = unchanged).
+  server_token:
+    name: Server token
+    description: If set, clients must pass it as ?token=, X-Kindle-Token or Authorization Bearer.
+network:
+  8080/tcp: HTTP port of the renderer

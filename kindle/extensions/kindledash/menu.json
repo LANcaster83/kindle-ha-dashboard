@@ -1,0 +1,68 @@
+{
+	"items": [
+	{
+		"name": "Kindle Dashboard",
+		"priority": 1,
+		"items": [
+		{
+			"name": "Start dashboard",
+			"priority": 1,
+			"action": "bin/start.sh",
+			"params": "keep",
+			"exitmenu": true,
+			"refresh": false,
+			"status": false,
+			"internal": "status Starting dashboard (UI kept, exit via Stop)"
+		},
+		{
+			"name": "Start dashboard (freeze UI)",
+			"priority": 2,
+			"action": "bin/start.sh",
+			"params": "freeze",
+			"exitmenu": true,
+			"refresh": false,
+			"status": false,
+			"internal": "status Starting dashboard, Kindle UI frozen (exit = hold power / restart)"
+		},
+		{
+			"name": "Start dashboard (stop framework)",
+			"priority": 3,
+			"action": "bin/start.sh",
+			"params": "stop_framework",
+			"exitmenu": true,
+			"refresh": false,
+			"status": false,
+			"internal": "status Starting dashboard, framework stopped (exit = hold power / restart)"
+		},
+		{
+			"name": "Stop dashboard",
+			"priority": 4,
+			"action": "bin/stop.sh",
+			"exitmenu": false,
+			"refresh": true,
+			"status": false,
+			"internal": "status Stopping dashboard"
+		},
+		{
+			"name": "Fetch once (test)",
+			"priority": 5,
+			"action": "bin/kindledash.sh",
+			"params": "--once",
+			"exitmenu": true,
+			"refresh": false,
+			"status": false,
+			"internal": "status Fetching one frame"
+		},
+		{
+			"name": "Show status / log",
+			"priority": 6,
+			"action": "bin/status.sh",
+			"exitmenu": false,
+			"refresh": false,
+			"status": false,
+			"internal": "status Showing log tail"
+		}
+		]
+	}
+	]
+}

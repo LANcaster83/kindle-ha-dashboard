@@ -1,0 +1,67 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to the Kindle Dashboard renderer",
+        "description": "The renderer is the *Kindle Dashboard Renderer* app (add-on). The device token is what you put into `config.sh` on the Kindle; it protects `{image_path}` and `{status_path}`.",
+        "data": {
+          "device_name": "Device name",
+          "addon_url": "Renderer URL",
+          "addon_token": "Renderer server token (if set in the app options)",
+          "device_token": "Device token for the Kindle"
+        },
+        "data_description": {
+          "addon_url": "Base URL of the renderer app, e.g. http://local-kindledash:8080 or http://<hash>-kindledash:8080.",
+          "device_token": "Generated for you; copy it to the Kindle. At least 8 characters."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the renderer at this URL.",
+      "invalid_auth": "The renderer rejected the server token.",
+      "invalid_url": "The URL must start with http:// or https://.",
+      "token_too_short": "Use at least 8 characters."
+    },
+    "abort": {
+      "already_configured": "This renderer is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Kindle Dashboard options",
+        "data": {
+          "addon_url": "Renderer URL",
+          "addon_token": "Renderer server token",
+          "device_token": "Device token for the Kindle"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach the renderer at this URL.",
+      "invalid_auth": "The renderer rejected the server token.",
+      "invalid_url": "The URL must start with http:// or https://.",
+      "token_too_short": "Use at least 8 characters."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "battery": { "name": "Battery" },
+      "last_seen": { "name": "Last seen" },
+      "last_render": { "name": "Last render" },
+      "renderer_status": {
+        "name": "Renderer status",
+        "state": { "ok": "OK", "error": "Error", "offline": "Offline" }
+      }
+    },
+    "button": {
+      "render_now": { "name": "Render now" }
+    }
+  },
+  "services": {
+    "render": {
+      "name": "Render now",
+      "description": "Ask the kindledash renderer to produce a fresh dashboard image immediately."
+    }
+  }
+}
