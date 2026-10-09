@@ -31,8 +31,15 @@ describe("buildConfig", () => {
   });
   it("accepts a port-less ha_url (Home Assistant on port 80)", () => {
     expect(buildConfig({ ha_url: "http://10.3.0.104" }, {}).haUrl).toBe("http://10.3.0.104");
-    expect(buildConfig({ ha_url: "" }, {}).haUrl).toBe("");
-    expect(buildConfig({ ha_url: null }, {}).haUrl).toBe("");
+  });
+  it("treats an empty or blank ha_url like a missing one (auto-detection)", () => {
+    // The HA configuration UI sends "" for a cleared field; the schema is str? so it reaches us.
+    for (const value of ["", "   ", null, undefined]) {
+      const cfg = buildConfig({ ha_url: value }, {});
+      expect(cfg.haUrl).toBe("");
+      expect(cfg.haUrlSource).toBe("unresolved");
+    }
+    expect(buildConfig({ ha_url: "http://x" }, { KD_HA_URL: "" }).haUrl).toBe("http://x");
   });
   it("validates ranges and enums", () => {
     expect(() => buildConfig({ interval: 1 }, {})).toThrow(ConfigError);

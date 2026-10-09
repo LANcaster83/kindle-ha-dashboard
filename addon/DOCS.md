@@ -26,6 +26,11 @@ Assistant *actually* answers on from inside the container: the frontend port
 is `http.server_port` in `configuration.yaml`, 8123 by default. The reference
 install here uses port 80, so `ha_url: http://10.3.0.104` (no `:8123`).
 
+The field may be left empty or cleared again in the configuration UI: an empty
+value is saved as `""` and means the same as no value (auto-detection). A
+non-empty value must start with `http://` or `https://`, otherwise the app
+refuses to start and says so in the log.
+
 ### When a render fails
 
 The error names the cause:
@@ -35,16 +40,25 @@ The error names the cause:
 - *is not the Home Assistant frontend (HTTP 404 ...)*: `ha_url` or
   `dashboard_path` points at something else (a 404 page, a reverse proxy, ...).
 - *Could not load ...*: connection refused or timeout; check `ha_url`.
+- *Render timed out after N ms during `<phase>`*: the whole attempt is bounded
+  by `render_timeout_ms` (default 45 s). The phase (`navigate`, `probe`,
+  `wait-dashboard`, `screenshot`, ...) says where Chromium stopped answering.
+  Chromium is then closed (killed if it does not exit) and started again for
+  the next render, so one hung page costs one interval, not a quarter of an
+  hour.
 
-Every failed render also leaves a screenshot of what Chromium saw at
-`/data/last-error.png`, served as `GET /last-error.png`.
+Every failed render except a timeout also leaves a screenshot of what Chromium
+saw at `/data/last-error.png`, served as `GET /last-error.png` (a hung page
+cannot be captured). `/status` reports `error_count` (total) and
+`consecutive_errors` (failures since the last good render; 0 while rendering
+works), which is the number to alert on.
 
 ## Endpoints
 
 | Path | Method | Description |
 |------|--------|-------------|
 | `/kindle.png` | GET | Latest image. `?render=1` forces a fresh render first. Supports `ETag`/`If-None-Match`. |
-| `/status` | GET | JSON: `ok`, `last_render`, `last_error`, `render_count`, `image_width`, ... |
+| `/status` | GET | JSON: `ok`, `last_render`, `last_error`, `render_count`, `error_count`, `consecutive_errors`, `image_width`, ... |
 | `/render` | POST | Render now, returns the status document. |
 | `/config` | GET | Effective options with secrets masked, plus `haUrlSource`. |
 | `/last-error.png` | GET | Screenshot of the last failed render (404 until one happened). |
@@ -58,7 +72,7 @@ If `server_token` is set, every endpoint except `/health` requires it as
 
 | Option | Default | Notes |
 |--------|---------|-------|
-| `ha_url` | empty = auto | Leave empty on HAOS (Supervisor tells the port). Otherwise the URL HA really listens on, e.g. `http://10.3.0.104` for port 80. |
+| `ha_url` | empty = auto | Leave empty on HAOS (Supervisor tells the port); clearing the field in the UI is fine. Otherwise the URL HA really listens on, e.g. `http://10.3.0.104` for port 80. |
 | `access_token` | required | Long-lived access token (Profile -> Security). |
 | `dashboard_path` | `/dashboard-test-2` | Any Lovelace path, e.g. `/lovelace/0`. |
 | `url_query` | empty | Appended to the URL, e.g. `?kiosk` when the kiosk-mode plugin is installed. |
@@ -86,7 +100,8 @@ If `server_token` is set, every endpoint except `/health` requires it as
 - Rendering takes 3-10 s on x86; a Raspberry Pi 4 needs noticeably longer and
   more RAM (Chromium ~300 MB).
 - Environment-only knobs (compose / local runs): `KD_RENDER_TIMEOUT_MS`
-  (default 45000), `KD_LOG_LEVEL`, `KD_ERROR_SCREENSHOT` (empty disables the
-  failure screenshot).
+  (default 45000; hard bound for one render attempt, also Chromium's
+  `protocolTimeout`), `KD_LOG_LEVEL`, `KD_ERROR_SCREENSHOT` (empty disables
+  the failure screenshot).
 - The Web UI preview shows the PNG exactly as the Kindle receives it, i.e.
   rotated when `rotation` is not 0.

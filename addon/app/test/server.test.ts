@@ -9,13 +9,14 @@ import { createApp, RenderState } from "../src/server.js";
 import type { Renderer, RenderResult } from "../src/renderer.js";
 import { encodeGrayPng } from "../src/image.js";
 
-function fakeRenderer(opts: { fail?: boolean } = {}): Renderer & { calls: number } {
+function fakeRenderer(opts: { fail?: boolean } = {}): Renderer & { calls: number; fail: boolean } {
   const png = encodeGrayPng({ width: 2, height: 2, data: new Uint8Array([0, 255, 255, 0]) });
   const r = {
     calls: 0,
+    fail: opts.fail ?? false,
     render(): Promise<RenderResult> {
       r.calls += 1;
-      if (opts.fail) return Promise.reject(new Error("boom"));
+      if (r.fail) return Promise.reject(new Error("boom"));
       return Promise.resolve({ png, width: 2, height: 2, renderedAt: new Date("2026-10-08T12:00:00Z"), durationMs: 5 });
     },
     close(): Promise<void> {
@@ -119,6 +120,27 @@ describe("HTTP server", () => {
     expect(status.ok).toBe(false);
     expect(status.last_error).toBe("boom");
     expect(status.error_count).toBe(1);
+  });
+
+  it("counts consecutive failures and resets the count on success", async () => {
+    const renderer = fakeRenderer({ fail: true });
+    const cfg = buildConfig({}, {});
+    const state = new RenderState(renderer, cfg);
+    const app = createApp(state, cfg);
+    server = createServer((req, res) => void app(req, res));
+    base = await listen(server);
+    const read = async () =>
+      (await (await fetch(`${base}/status`)).json()) as { error_count: number; consecutive_errors: number; ok: boolean };
+    expect((await read()).consecutive_errors).toBe(0);
+    await fetch(`${base}/render`, { method: "POST" });
+    await fetch(`${base}/render`, { method: "POST" });
+    expect(await read()).toMatchObject({ error_count: 2, consecutive_errors: 2, ok: false });
+    renderer.fail = false;
+    await fetch(`${base}/render`, { method: "POST" });
+    expect(await read()).toMatchObject({ error_count: 2, consecutive_errors: 0, ok: true });
+    renderer.fail = true;
+    await fetch(`${base}/render`, { method: "POST" });
+    expect(await read()).toMatchObject({ error_count: 3, consecutive_errors: 1, ok: false });
   });
 
   describe("with server token", () => {
