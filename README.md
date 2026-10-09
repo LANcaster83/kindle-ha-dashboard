@@ -43,18 +43,15 @@ sensor fed by the Kindle, "last seen" / "last render" diagnostics and a
   its bundled `fbink`; if you do not want KOReader, see
   [kindle/README.md](kindle/README.md) for other ways to get `fbink`.
 - The Kindle must reach HA over plain **HTTP** (busybox `wget` on the Kindle has
-  no TLS). The default URLs use `http://10.3.0.104:8123`.
-
-> **Private repository note.** The Supervisor and HACS clone repositories
-> anonymously. While this GitHub repository is private, use the *manual*
-> installation paths described below (local app in `/addons`, integration copied
-> to `/config/custom_components`), or make the repository public.
+  no TLS). Use the URL HA really listens on: this instance answers on port 80,
+  so the defaults use `http://10.3.0.104` (a stock install would be
+  `http://<host>:8123`).
 
 ## 1. Renderer app (add-on)
 
 ### Install
 
-Option A, custom repository (repository must be public):
+Option A, custom repository:
 
 1. Settings → Apps (Add-ons) → App store → ⋮ → *Repositories* → add
    `https://github.com/LANcaster83/kindle-ha-dashboard` → *Add*.
@@ -62,8 +59,7 @@ Option A, custom repository (repository must be public):
 2. Install **Kindle Dashboard Renderer**. The image is built locally on the
    HAOS host (a few minutes the first time).
 
-Option B, local app (works with a private repo): copy the `addon/` folder to the
-HAOS `addons` share as `addons/kindledash` (Samba app, or `ssh` into the OS),
+Option B, local app: copy the `addon/` folder to the HAOS `addons` share as `addons/kindledash` (Samba app, or `ssh` into the OS),
 then Settings → Apps → App store → ⋮ → *Check for updates*. It shows up under
 *Local apps*.
 
@@ -74,10 +70,17 @@ then Settings → Apps → App store → ⋮ → *Check for updates*. It shows u
 2. App → *Configuration*:
    - `access_token`: the token from step 1.
    - `dashboard_path`: `/dashboard-test-2` (default) or any Lovelace path.
-   - Leave `ha_url` at `http://homeassistant:8123` on HAOS.
+   - `ha_url`: leave **empty** on HAOS. The app asks the Supervisor which port
+     HA listens on (here 80, so it uses `http://homeassistant`). Set it only if
+     the log warns, to the URL HA really answers on, e.g. `http://10.3.0.104`
+     (not `:8123` on this host).
+   - `width`/`height`/`rotation`: `1680`/`1264`/`90` (default) is a landscape
+     dashboard for the Oasis, see [Orientation](#orientation) below.
    - Optional: `server_token` (random string) to protect the app's own port.
 3. *Start*. Open the *Web UI* (`http://10.3.0.104:8080/`) to see the preview
-   and status; `http://10.3.0.104:8080/kindle.png` is the image.
+   and status; `http://10.3.0.104:8080/kindle.png` is the image. The log says
+   which HA URL was picked (`Home Assistant URL: ...`). A failed render leaves
+   `http://10.3.0.104:8080/last-error.png` showing what Chromium saw.
 
 Full option reference: [addon/DOCS.md](addon/DOCS.md).
 
@@ -89,7 +92,7 @@ Option A (public repo): HACS → ⋮ → *Custom repositories* → URL
 `https://github.com/LANcaster83/kindle-ha-dashboard`, type *Integration* → *Add*
 → search *Kindle Dashboard* → *Download* → restart HA.
 
-Option B (private repo): copy `custom_components/kindle_dashboard` into
+Option B (manual): copy `custom_components/kindle_dashboard` into
 `/config/custom_components/` and restart HA. HACS will not manage updates in
 this case.
 
@@ -114,18 +117,22 @@ You get a device *Kindle …* with:
 
 Endpoints (token = device token, or a logged-in HA session):
 
-- `GET http://10.3.0.104:8123/api/kindle_dashboard/image?token=…` → PNG (`&render=1` forces a fresh render),
-- `POST http://10.3.0.104:8123/api/kindle_dashboard/status?token=…` with JSON `{"battery": 73, "charging": false, …}`.
+- `GET http://10.3.0.104/api/kindle_dashboard/image?token=…` → PNG (`&render=1` forces a fresh render),
+- `POST http://10.3.0.104/api/kindle_dashboard/status?token=…` with JSON `{"battery": 73, "charging": false, …}`.
+
+(`http://10.3.0.104` is HA's own port here, 80; append `:8123` on a stock install.)
 
 ## 3. Kindle (KUAL extension)
 
 ### Prerequisites on the Kindle
 
 - Jailbreak (done: WinterBreak) and KUAL (done).
-- **Install the post-jailbreak hotfix** (MobileRead "Hotfix" package via
-  MRInstaller: copy `Update_hotfix_*.bin` to `/mnt/us/mrpackages/` and run
-  *Install MR Packages* from KUAL). The device log reports it is still missing.
-  Keep OTA updates blocked (`renameotabin` is installed).
+- **Install the post-jailbreak hotfix** if the jailbreak log says it is
+  missing: `Update_hotfix_universal.bin` from
+  <https://github.com/KindleModding/Hotfix/releases> into
+  `/mnt/us/mrpackages/`, then `;log mrpi` in the Kindle search box (or KUAL →
+  *Helper* → *Install MR Packages*). Keep OTA updates blocked (`renameotabin`
+  is installed).
 - Airplane mode off, Wi-Fi joined to the network that can reach HA.
 
 ### Copy the extension (USB drive mode)
@@ -137,8 +144,8 @@ Endpoints (token = device token, or a logged-in HA session):
 3. Edit `<kindle>/extensions/kindledash/config.sh`:
 
    ```sh
-   IMAGE_URL="http://10.3.0.104:8123/api/kindle_dashboard/image"
-   STATUS_URL="http://10.3.0.104:8123/api/kindle_dashboard/status"
+   IMAGE_URL="http://10.3.0.104/api/kindle_dashboard/image"
+   STATUS_URL="http://10.3.0.104/api/kindle_dashboard/status"
    TOKEN="<device token from the integration>"
    INTERVAL=60
    ```
@@ -147,7 +154,24 @@ Endpoints (token = device token, or a logged-in HA session):
    `STATUS_URL=""` and the app's `server_token` as `TOKEN`.
 4. Eject safely, disconnect.
 
-From the Linux dev box: `sudo mount /dev/sda /mnt/kindle && cp -r kindle/extensions/kindledash /mnt/kindle/extensions/ && sudo umount /mnt/kindle`.
+From the Linux dev box (vfat, mount as your user so the copy is writable):
+`sudo mount -o uid=$(id -u),gid=$(id -g) /dev/sda /mnt/kindle && cp -r kindle/extensions/kindledash /mnt/kindle/extensions/ && sync && sudo umount /mnt/kindle`.
+
+### Orientation
+
+- The Oasis panel is 1264x1680. On Kindle, `fbink -g` copies the PNG 1:1 into
+  the framebuffer and **never rotates** it (verified in FBInk's source: the
+  `FBINK_NO_SW_ROTA` switch only exists in the PocketBook/Kobo code paths).
+- While the Home screen or KUAL is in front the framebuffer is **portrait**
+  (landscape exists only inside the stock reader), so a landscape dashboard
+  must arrive already rotated. That is the app default: viewport `1680x1264`,
+  `rotation: 90`, giving a 1264x1680 PNG.
+- Dashboard upside down for the hand you hold it in (page-turn buttons on the
+  wrong side)? Set `rotation: 270` in the app.
+- Portrait dashboard: `width: 1264`, `height: 1680`, `rotation: 0` (or `180`).
+- The daemon logs `Frame WxH, framebuffer WxH` after the first fetch
+  (`Show status / log`) and prints a warning on screen when the frame is larger
+  than the framebuffer (it would be cropped).
 
 ### Run
 
@@ -202,7 +226,8 @@ Kindle scripts: `shellcheck -s sh kindle/extensions/kindledash/bin/*.sh`. The
 daemon runs under busybox `sh`; keep it POSIX.
 
 CI (`.github/workflows/ci.yaml`) runs all of the above plus hassfest, the HACS
-validator and an amd64 Docker build of the app.
+validator and an amd64 Docker build of the app; it can also be started by hand
+(*Run workflow*).
 
 ## Troubleshooting
 
@@ -211,11 +236,12 @@ flashes black→white). Increase `contrast` in the app (1.3–1.6) or set
 `gray_levels: 2` for pure black and white. Keep dithering on for photos and
 graphs, off for text-only dashboards.
 
-**Image is rotated or cut off.** The Oasis framebuffer is natively landscape;
-`fbink` rotates to portrait automatically. If the picture comes out sideways
-set `FBINK_NO_SW_ROTA=1` in `config.sh`, or set `rotation: 90` in the app (the
-viewport is swapped for you). Add `w=-2,h=-2` to `FBINK_IMG_OPTS` to scale to
-fit instead of cropping.
+**Image is rotated, cut off or blank.** See [Orientation](#orientation): the
+framebuffer is portrait, `fbink` does not rotate, so the PNG must be 1264 wide
+x 1680 high (`rotation: 90` or `270` with a landscape viewport). *Show status /
+log* prints the frame and framebuffer sizes. Add `w=-2,h=-2` to
+`FBINK_IMG_OPTS` to scale to fit instead of cropping. A blank screen after
+*Fetch once* means the fetch failed; the log tail names the reason.
 
 **Kindle shows "offline since …".** The fetch failed. Check Wi-Fi (the daemon
 pings the server host and asks `wifid` to enable the radio), that the URL is
@@ -235,6 +261,13 @@ battery sensor in HA lets you automate a notification (`below: 15`).
 **App log says "Home Assistant showed the login page".** The long-lived token
 is missing, revoked, or `ha_url` points at a different origin than the token
 was created on. Create a new token and restart the app.
+
+**App log says "is not the Home Assistant frontend (HTTP 404 ...)" or "Could
+not load".** `ha_url` (or `dashboard_path`) points at something that is not
+the HA frontend: a mistyped URL such as `http://10.3.0.104/8123`, a port HA
+does not listen on (`ERR_CONNECTION_REFUSED`), or a reverse proxy. Leave
+`ha_url` empty on HAOS or set it to the URL HA really answers on; the
+screenshot at `/last-error.png` shows what Chromium got.
 
 **Header / sidebar still visible.** The hide logic walks the frontend's shadow
 DOM and may lag behind a frontend release. Install the *kiosk-mode* HACS
