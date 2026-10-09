@@ -1,5 +1,5 @@
 #!/bin/sh
-# Launch the dashboard daemon in the background. $1 = keep | freeze | stop_framework
+# Launch the dashboard daemon in the background. $1 = keep | stop_framework
 EXT_DIR="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)"
 [ -d "${EXT_DIR}" ] || EXT_DIR="/mnt/us/extensions/kindledash"
 export KINDLEDASH_DIR="${EXT_DIR}"

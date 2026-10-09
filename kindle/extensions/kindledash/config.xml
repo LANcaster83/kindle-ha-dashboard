@@ -2,7 +2,7 @@
 <extension>
 	<information>
 		<name>Kindle Dashboard</name>
-		<version>0.2.0</version>
+		<version>0.2.1</version>
 		<author>Krzysztof Kotkowicz</author>
 		<id>kindledash</id>
 	</information>

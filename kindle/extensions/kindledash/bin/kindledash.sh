@@ -1,21 +1,26 @@
 #!/bin/sh
 # Kindle Dashboard daemon: fetch PNG, draw with fbink, report battery, repeat.
 # Runs on jailbroken Kindle firmware 5.x (busybox sh). Started by bin/start.sh
-# or directly: kindledash.sh [keep|freeze|stop_framework] [--once]
+# or directly: kindledash.sh [keep|stop_framework] [--once]
+
+# KUAL does not guarantee a sane PATH for the scripts it launches; lipc-*,
+# eips, gasgauge-info and the upstart tools all live in /usr/bin and /sbin.
+PATH="${PATH}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
 
 EXT_DIR="${KINDLEDASH_DIR:-/mnt/us/extensions/kindledash}"
-RUN_DIR="/var/tmp/kindledash"
+RUN_DIR="${KINDLEDASH_RUN_DIR:-/var/tmp/kindledash}"
 PIDFILE="${RUN_DIR}/pid"
 LOG_FILE="${EXT_DIR}/log/kindledash.log"
 STOP_FILE="${EXT_DIR}/STOP"
 
 # /mnt/us is vfat over fuse: run a copy of this script from tmpfs so that
 # USB drive mode or an update of the extension cannot pull the rug from under us.
-if [ "$(dirname "$0")" != "/var/tmp" ]; then
+if [ "$(dirname "$0")" != "${RUN_DIR}" ]; then
     mkdir -p "${RUN_DIR}"
-    cp -f "$0" /var/tmp/kindledash.sh
-    chmod 755 /var/tmp/kindledash.sh
-    exec /var/tmp/kindledash.sh "$@"
+    cp -f "$0" "${RUN_DIR}/kindledash.sh"
+    chmod 755 "${RUN_DIR}/kindledash.sh"
+    exec "${RUN_DIR}/kindledash.sh" "$@"
 fi
 
 mkdir -p "${RUN_DIR}" "${EXT_DIR}/log"
@@ -45,7 +50,7 @@ fi
 ONCE=0
 for arg in "$@"; do
     case "${arg}" in
-        keep | freeze | stop_framework) UI_MODE="${arg}" ;;
+        keep | stop_framework | freeze) UI_MODE="${arg}" ;;
         --once) ONCE=1 ;;
     esac
 done
@@ -63,18 +68,45 @@ rotate_log() {
     fi
 }
 
-find_fbink() {
-    if [ -n "${FBINK_BIN}" ] && [ -x "${FBINK_BIN}" ]; then
-        echo "${FBINK_BIN}"
-        return
+# Run a command, keep its stderr, log it with the exit code when it fails.
+# $1 = label for the log, rest = command. Returns the command's exit code.
+run_logged() {
+    label="$1"
+    shift
+    "$@" >/dev/null 2>"${RUN_DIR}/stderr"
+    rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        log "${label} failed rc=${rc}: $(tr '\n' ' ' <"${RUN_DIR}/stderr" | cut -c1-300)"
     fi
-    for candidate in "${EXT_DIR}/bin/fbink" /mnt/us/koreader/fbink /mnt/us/libkh/bin/fbink /usr/bin/fbink; do
-        if [ -x "${candidate}" ]; then
+    return "${rc}"
+}
+
+fbink_has_image_support() {
+    # FBInk built with MINIMAL=1 (KOReader's copy) compiles the image code out and
+    # replies "Image support is disabled in this FBInk build" to -g. That message
+    # only exists in such builds, so its presence in the binary is the tell.
+    ! grep -q 'Image support is disabled in this FBInk build' "$1" 2>/dev/null
+}
+
+find_fbink() {
+    # Prints the first fbink that can draw images. Candidates: our own copy, the
+    # one installed by the KindleModding hotfix (full build), KOReader's (text
+    # only), a system one. Logs every rejected candidate.
+    if [ -n "${FBINK_BIN}" ]; then
+        [ -f "${FBINK_BIN}" ] || log "FBINK_BIN=${FBINK_BIN} not found"
+        set -- "${FBINK_BIN}"
+    else
+        set -- "${EXT_DIR}/bin/fbink" /mnt/us/libkh/bin/fbink /mnt/us/koreader/fbink /usr/bin/fbink
+    fi
+    for candidate in "$@"; do
+        [ -f "${candidate}" ] || continue
+        if fbink_has_image_support "${candidate}"; then
             echo "${candidate}"
-            return
+            return 0
         fi
+        log "Skipping ${candidate}: built without image support (cannot draw PNG)"
     done
-    echo ""
+    return 1
 }
 
 # Copy fbink to tmpfs too (same vfat reasoning as above).
@@ -83,6 +115,8 @@ FBINK=""
 if [ -n "${FBINK_SRC}" ]; then
     cp -f "${FBINK_SRC}" "${RUN_DIR}/fbink" && chmod 755 "${RUN_DIR}/fbink" && FBINK="${RUN_DIR}/fbink"
 fi
+EIPS=""
+command -v eips >/dev/null 2>&1 && EIPS="eips"
 
 HTTP_CLIENT=""
 if command -v curl >/dev/null 2>&1; then
@@ -99,27 +133,36 @@ say() {
     # Print one line of text at the bottom of the screen without disturbing the image much.
     if [ -n "${FBINK}" ]; then
         "${FBINK}" -q -y -1 -m "$1" >/dev/null 2>&1
-    else
+    elif [ -n "${EIPS}" ]; then
         eips 0 39 "$1" >/dev/null 2>&1
     fi
 }
 
+DRAWS_OK=0
 draw_image() {
-    # $1 = png path, $2 = 1 for full refresh
+    # $1 = png path, $2 = 1 for full refresh. Tries fbink, then eips.
+    # Logs the first success and every failure (exit code + stderr).
     if [ -n "${FBINK}" ]; then
-        if [ "$2" = "1" ]; then
-            "${FBINK}" -q -c -f -g "file=$1,${FBINK_IMG_OPTS}" >/dev/null 2>&1
-        else
-            "${FBINK}" -q -g "file=$1,${FBINK_IMG_OPTS}" >/dev/null 2>&1
-        fi
-    else
-        if [ "$2" = "1" ]; then
-            eips -c >/dev/null 2>&1
-            eips -f -g "$1" >/dev/null 2>&1
-        else
-            eips -g "$1" >/dev/null 2>&1
+        fb_opts=""
+        [ "$2" = "1" ] && fb_opts="-c -f"
+        # shellcheck disable=SC2086
+        if run_logged "fbink ${fb_opts} -g" "${FBINK}" -q ${fb_opts} -g "file=$1,${FBINK_IMG_OPTS}"; then
+            [ "${DRAWS_OK}" -eq 0 ] && log "Drew $1 with ${FBINK_SRC} (full=$2)"
+            DRAWS_OK=$((DRAWS_OK + 1))
+            return 0
         fi
     fi
+    if [ -n "${EIPS}" ]; then
+        [ "$2" = "1" ] && eips -c >/dev/null 2>&1
+        if run_logged "eips -g" eips -g "$1"; then
+            [ "${DRAWS_OK}" -eq 0 ] && log "Drew $1 with eips (full=$2)"
+            [ "$2" = "1" ] && eips -f >/dev/null 2>&1
+            DRAWS_OK=$((DRAWS_OK + 1))
+            return 0
+        fi
+    fi
+    [ -n "${FBINK}${EIPS}" ] || log "No fbink with image support and no eips: cannot draw"
+    return 1
 }
 
 http_get() {
@@ -151,6 +194,13 @@ png_size() {
     printf '%dx%d' "0x$(echo "${hex}" | cut -c1-8)" "0x$(echo "${hex}" | cut -c9-16)"
 }
 
+png_format() {
+    # Prints "bitdepth/colortype" from IHDR (bytes 24-25): 8/0 = 8-bit grayscale.
+    hex="$(od -An -tx1 -j24 -N2 "$1" 2>/dev/null | tr -d ' \n')"
+    [ "${#hex}" -eq 4 ] || return 1
+    printf '%d/%d' "0x$(echo "${hex}" | cut -c1-2)" "0x$(echo "${hex}" | cut -c3-4)"
+}
+
 fb_geometry() {
     # Prints "WxH rota=N" of the framebuffer as fbink sees it (fbink draws 1:1, no rotation on Kindle).
     [ -n "${FBINK}" ] || return 1
@@ -165,8 +215,9 @@ fb_geometry() {
 check_geometry() {
     # $1 = png path. Logs frame vs framebuffer size and warns when the image would be cropped.
     img="$(png_size "$1")" || return 0
-    fb="$(fb_geometry)" || { log "Frame ${img}, framebuffer unknown (no fbink)"; return 0; }
-    log "Frame ${img}, framebuffer ${fb}"
+    fmt="$(png_format "$1")"
+    fb="$(fb_geometry)" || { log "Frame ${img} (${fmt:-?} bitdepth/colortype), framebuffer unknown (no fbink)"; return 0; }
+    log "Frame ${img} (${fmt:-?} bitdepth/colortype), framebuffer ${fb}"
     iw="${img%x*}"; ih="${img#*x}"
     fbw="${fb%%x*}"; fbh="${fb#*x}"; fbh="${fbh%% *}"
     if [ "${iw}" -gt "${fbw}" ] || [ "${ih}" -gt "${fbh}" ]; then
@@ -175,16 +226,36 @@ check_geometry() {
     fi
 }
 
+lipc_set() {
+    # $1 = source, $2 = property, $3 = value. Logs failures (missing tool, unknown property).
+    run_logged "lipc-set-prop $1 $2 $3" lipc-set-prop "$1" "$2" "$3"
+}
+
 battery_level() {
-    level="$(lipc-get-prop com.lab126.power batteryLevel 2>/dev/null)"
-    if [ -z "${level}" ]; then
+    # Prints the battery percentage (empty when unknown). $1 = "log" also logs the source.
+    # powerd owns the battery on FW 5.x: lipc-get-prop com.lab126.powerd battLevel.
+    level="$(lipc-get-prop com.lab126.powerd battLevel 2>/dev/null)"
+    source="lipc"
+    if ! [ "${level:-x}" -ge 0 ] 2>/dev/null; then
         level="$(gasgauge-info -c 2>/dev/null | tr -d '% ')"
+        source="gasgauge-info"
     fi
-    echo "${level:-0}"
+    if ! [ "${level:-x}" -ge 0 ] 2>/dev/null; then
+        for f in /sys/class/power_supply/*/capacity; do
+            [ -r "${f}" ] && level="$(cat "${f}" 2>/dev/null)" && break
+        done
+        source="sysfs"
+    fi
+    if ! [ "${level:-x}" -ge 0 ] 2>/dev/null; then
+        level=""
+        source="none"
+    fi
+    [ "$1" = "log" ] && log "Battery: ${level:-unknown} (via ${source})"
+    echo "${level}"
 }
 
 is_charging() {
-    c="$(lipc-get-prop com.lab126.power isCharging 2>/dev/null)"
+    c="$(lipc-get-prop com.lab126.powerd isCharging 2>/dev/null)"
     [ "${c}" = "1" ] && echo true || echo false
 }
 
@@ -200,7 +271,7 @@ wait_for_wifi() {
         tries=$((tries + 1))
         if [ "${tries}" -eq 1 ]; then
             log "Waiting for network (${host})"
-            lipc-set-prop com.lab126.cmd wirelessEnable 1 >/dev/null 2>&1
+            lipc_set com.lab126.cmd wirelessEnable 1
         fi
         if [ "${tries}" -ge 30 ]; then
             log "Network still down after ${tries} tries"
@@ -218,42 +289,47 @@ UI_APPLIED=""
 
 ui_enter() {
     # Keep the device awake and Wi-Fi on while we run.
-    lipc-set-prop com.lab126.powerd preventScreenSaver 1 >/dev/null 2>&1
-    lipc-set-prop com.lab126.cmd wirelessEnable 1 >/dev/null 2>&1
+    lipc_set com.lab126.powerd preventScreenSaver 1
+    lipc_set com.lab126.cmd wirelessEnable 1
     case "${UI_MODE}" in
         freeze)
-            # Same recipe as KOReader on FW >= 5.7.2: kill the status bar and freeze the WM.
-            lipc-set-prop com.lab126.pillow disableEnablePillow disable >/dev/null 2>&1
-            killall -STOP awesome >/dev/null 2>&1
-            UI_APPLIED="freeze"
+            # KOReader's SIGSTOP-the-window-manager recipe only works for a foreground app that
+            # owns the input and resumes the WM itself; for a daemon it leaves the Kindle
+            # unresponsive (seen on FW 5.16.2). Not supported any more: behave like keep.
+            log "UI mode freeze was removed (froze the Kindle on FW 5.16); running in keep mode"
+            UI_MODE="keep"
             ;;
         stop_framework)
             if [ -d /etc/upstart ]; then
+                # The job sends SIGTERM to its process tree on stop: do not die with it.
                 trap "" TERM
-                stop lab126_gui >/dev/null 2>&1
-                sleep 2
+                run_logged "stop lab126_gui" stop lab126_gui
                 trap - TERM
             else
-                /etc/init.d/framework stop >/dev/null 2>&1
+                run_logged "framework stop" /etc/init.d/framework stop
             fi
             UI_APPLIED="stop_framework"
+            # The teardown ends with the framework blanking the screen; wait for it so
+            # that our first frame is not wiped (KOReader waits 1.25 s, be generous).
+            tries=0
+            while pidof awesome pillow >/dev/null 2>&1 && [ "${tries}" -lt 20 ]; do
+                tries=$((tries + 1))
+                sleep 1
+            done
+            sleep 3
+            log "Framework stopped (waited $((tries + 3))s, still running: $(pidof awesome pillow cvm 2>/dev/null || echo none))"
             ;;
     esac
 }
 
 ui_leave() {
-    lipc-set-prop com.lab126.powerd preventScreenSaver 0 >/dev/null 2>&1
+    lipc_set com.lab126.powerd preventScreenSaver 0
     case "${UI_APPLIED}" in
-        freeze)
-            killall -CONT awesome >/dev/null 2>&1
-            lipc-set-prop com.lab126.pillow disableEnablePillow enable >/dev/null 2>&1
-            lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home >/dev/null 2>&1
-            ;;
         stop_framework)
             if [ -d /etc/upstart ]; then
-                start lab126_gui >/dev/null 2>&1
+                run_logged "start lab126_gui" start lab126_gui
             else
-                /etc/init.d/framework start >/dev/null 2>&1
+                run_logged "framework start" /etc/init.d/framework start
             fi
             ;;
     esac
@@ -270,20 +346,31 @@ cleanup() {
     exit 0
 }
 
+log_environment() {
+    log "Tools: http=${HTTP_CLIENT:-none} fbink=${FBINK_SRC:-none} eips=${EIPS:-none} lipc=$(command -v lipc-get-prop || echo none) fw=$(firmware_version)"
+    battery_level log >/dev/null
+}
+
 if [ "${ONCE}" = "1" ]; then
     # One-shot test: fetch and draw a single frame, no UI changes, no loop.
     rotate_log
-    log "Fetch once: ${IMAGE_URL} via ${HTTP_CLIENT:-none}, fbink=${FBINK_SRC:-eips}"
+    log "Fetch once: ${IMAGE_URL}"
+    log_environment
     if [ -z "${HTTP_CLIENT}" ]; then
         say "kindledash: no curl/wget found"
         exit 1
     fi
     if http_get "${IMAGE_URL}?token=${TOKEN}" "${RUN_DIR}/once.png" && is_png "${RUN_DIR}/once.png"; then
-        draw_image "${RUN_DIR}/once.png" 1
         check_geometry "${RUN_DIR}/once.png"
-        log "Fetch once OK"
+        if draw_image "${RUN_DIR}/once.png" 1; then
+            log "Fetch once OK"
+        else
+            log "Fetch once: fetched but could not draw, see the lines above"
+            say "kindledash: fetched, draw failed (see log)"
+            exit 1
+        fi
     else
-        log "Fetch once failed"
+        log "Fetch once failed (http rc=$?)"
         say "kindledash: fetch failed, see log"
         exit 1
     fi
@@ -301,7 +388,8 @@ trap cleanup INT TERM
 trap "" HUP
 
 rotate_log
-log "Starting: url=${IMAGE_URL} interval=${INTERVAL}s mode=${UI_MODE} http=${HTTP_CLIENT:-none} fbink=${FBINK_SRC:-eips}"
+log "Starting: url=${IMAGE_URL} interval=${INTERVAL}s mode=${UI_MODE}"
+log_environment
 if [ -z "${HTTP_CLIENT}" ]; then
     say "kindledash: no curl/wget found"
     cleanup
@@ -316,7 +404,9 @@ say "kindledash starting..."
 
 CUR_PNG="${RUN_DIR}/current.png"
 TMP_PNG="${RUN_DIR}/next.png"
-frame=0
+# Start at the threshold so the very first frame is a full, flashing refresh
+# that clears whatever the Kindle UI left on the screen.
+frame="${FULL_REFRESH_EVERY}"
 failures=0
 checked=0
 started_at="$(date +%s)"
@@ -342,10 +432,12 @@ while :; do
             frame=0
         fi
         failures=0
-        draw_image "${CUR_PNG}" "${full}"
         if [ "${checked}" = "0" ]; then
             check_geometry "${CUR_PNG}"
             checked=1
+        fi
+        if ! draw_image "${CUR_PNG}" "${full}"; then
+            say " kindledash: draw failed, see log "
         fi
         frame=$((frame + 1))
     else
@@ -358,7 +450,7 @@ while :; do
     fi
 
     bat="$(battery_level)"
-    if [ "${bat}" -le "${LOW_BATTERY_PERCENT}" ] 2>/dev/null; then
+    if [ -n "${bat}" ] && [ "${bat}" -le "${LOW_BATTERY_PERCENT}" ] 2>/dev/null; then
         say " battery ${bat}% "
     fi
     if [ "${BATTERY_REPORT_EVERY}" -gt 0 ] && [ -n "${STATUS_URL}" ] && [ $((now - last_report)) -ge "${BATTERY_REPORT_EVERY}" ]; then

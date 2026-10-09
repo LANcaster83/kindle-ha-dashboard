@@ -132,7 +132,10 @@ Endpoints (token = device token, or a logged-in HA session):
   <https://github.com/KindleModding/Hotfix/releases> into
   `/mnt/us/mrpackages/`, then `;log mrpi` in the Kindle search box (or KUAL →
   *Helper* → *Install MR Packages*). Keep OTA updates blocked (`renameotabin`
-  is installed).
+  is installed). The hotfix also installs the `fbink` the dashboard draws with
+  (`/mnt/us/libkh/bin/fbink`, a full FBInk build with PNG support). KOReader's
+  `fbink` is a text-only build (`MINIMAL=1`) and **cannot draw images**; the
+  daemon skips it. See [kindle/README.md](kindle/README.md#fbink).
 - Airplane mode off, Wi-Fi joined to the network that can reach HA.
 
 ### Copy the extension (USB drive mode)
@@ -181,19 +184,27 @@ KUAL → **Kindle Dashboard**:
 |-------|--------------|
 | *Fetch once (test)* | Downloads one frame and draws it. Use this first. |
 | *Start dashboard* | Loop in `keep` mode: Kindle UI stays alive, screensaver and Wi-Fi sleep disabled. *Stop dashboard* from KUAL works. The Kindle status bar clock may redraw over the top of the image until the next frame. |
-| *Start dashboard (freeze UI)* | Disables the status bar and freezes the window manager (KOReader's recipe). Clean image. Leave by holding the power button for ~7 s and choosing *Restart*, or by `bin/stop.sh` over SSH. |
-| *Start dashboard (stop framework)* | Stops the whole Kindle GUI: least RAM/CPU. Leave by restart. |
+| *Start dashboard (stop framework)* | Stops the whole Kindle GUI (`stop lab126_gui`): least RAM/CPU, nothing redraws over the image. KUAL is gone with it, so to stop: connect USB, create an empty file `STOP` in `extensions/kindledash/`, eject; the daemon sees it within `INTERVAL` seconds and starts the GUI again. Or restart the Kindle (hold power ~40 s). |
 | *Stop dashboard* | Stops the loop, restores UI/screensaver. |
 | *Show status / log* | Prints state, battery and the log tail on the screen. |
 
-The loop: wait for network → `wget` the PNG (kept on tmpfs) → `fbink -g`
-(partial refresh; full flashing refresh every `FULL_REFRESH_EVERY` frames and
-after a failed fetch) → report battery to `STATUS_URL` every
-`BATTERY_REPORT_EVERY` seconds → sleep `INTERVAL`. On fetch errors the last
-image stays and a small `offline since HH:MM (n)` marker is printed at the
+The former *freeze UI* entry (KOReader's "disable pillow + `SIGSTOP awesome`"
+recipe) froze the Kindle on FW 5.16.2 and was removed: that recipe only works
+for a foreground app that owns the input and resumes the window manager itself.
+
+The loop: wait for network → `curl`/`wget` the PNG (kept on tmpfs) → `fbink -g`
+(first frame and every `FULL_REFRESH_EVERY` frames a full, flashing refresh,
+also after a failed fetch; otherwise partial) → report battery to `STATUS_URL`
+every `BATTERY_REPORT_EVERY` seconds → sleep `INTERVAL`. On fetch errors the
+last image stays and a small `offline since HH:MM (n)` marker is printed at the
 bottom. Below `LOW_BATTERY_PERCENT` a `battery N%` marker is shown.
 
-Logs: `/mnt/us/extensions/kindledash/log/kindledash.log`.
+Logs: `/mnt/us/extensions/kindledash/log/kindledash.log`. Each start logs the
+tools it found (`Tools: http=… fbink=… eips=… lipc=…`), the battery source,
+the frame vs framebuffer geometry, the first successful draw (`Drew … with …`)
+and every failed `fbink`/`eips`/`lipc-set-prop` call with its exit code and
+stderr. "Fetch once OK" without a "Drew" line before it never happens any more:
+a fetched-but-not-drawn frame is reported as such on screen and in the log.
 
 ## Configuration reference
 
