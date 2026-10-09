@@ -1,7 +1,7 @@
 configuration:
   ha_url:
     name: Home Assistant URL
-    description: Base URL of the Home Assistant frontend as reachable from the app. Keep the default on HAOS.
+    description: Leave empty on HAOS; the app asks the Supervisor for the port Home Assistant listens on. Otherwise the URL HA really listens on, e.g. http://10.3.0.104 (port 80) or http://10.3.0.104:8123.
   access_token:
     name: Long-lived access token
     description: Created under your HA profile -> Security. Used by the headless browser to log in.
@@ -13,13 +13,13 @@ configuration:
     description: Optional query string appended to the dashboard URL, e.g. ?kiosk.
   width:
     name: Width
-    description: Rendered width in pixels (Kindle Oasis portrait = 1264).
+    description: Dashboard viewport width in pixels (Kindle Oasis landscape = 1680, portrait = 1264).
   height:
     name: Height
-    description: Rendered height in pixels (Kindle Oasis portrait = 1680).
+    description: Dashboard viewport height in pixels (Kindle Oasis landscape = 1264, portrait = 1680).
   rotation:
     name: Rotation
-    description: Rotate the final image clockwise by this many degrees.
+    description: Rotate the finished PNG clockwise. The Oasis framebuffer is portrait, so a landscape dashboard needs 90 (or 270 to flip it for the other hand).
   zoom:
     name: Zoom
     description: CSS zoom applied to the dashboard (1.0 = 100%).

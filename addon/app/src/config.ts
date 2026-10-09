@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from "node:fs";
 export type Rotation = 0 | 90 | 180 | 270;
 
 export interface Config {
+  /** Home Assistant base URL. Empty = resolve at startup (Supervisor, then probe), see haurl.ts. */
   haUrl: string;
   accessToken: string;
   dashboardPath: string;
@@ -25,6 +26,10 @@ export interface Config {
   chromiumPath: string;
   renderTimeoutMs: number;
   logLevel: "debug" | "info" | "warn" | "error";
+  /** Where the screenshot of a failed render is written. Empty disables it. */
+  errorScreenshotPath: string;
+  /** How haUrl was determined: "option", "supervisor", "probe", "default"; "unresolved" before startup. */
+  haUrlSource: string;
 }
 
 type RawOptions = Record<string, unknown>;
@@ -55,7 +60,12 @@ const ENV_MAP: Record<string, string> = {
   chromium_path: "CHROMIUM_PATH",
   render_timeout_ms: "KD_RENDER_TIMEOUT_MS",
   log_level: "KD_LOG_LEVEL",
+  error_screenshot: "KD_ERROR_SCREENSHOT",
 };
+
+/** Kindle Oasis (2017/2019) panel: 1264x1680 portrait, 300 ppi. Defaults render a landscape dashboard. */
+export const OASIS_LONG_EDGE = 1680;
+export const OASIS_SHORT_EDGE = 1264;
 
 export class ConfigError extends Error {}
 
@@ -113,19 +123,21 @@ export function buildConfig(fileOptions: RawOptions, env: NodeJS.ProcessEnv = pr
     if (v !== undefined && v !== "") raw[key] = v;
   }
 
-  const haUrl = str(raw, "ha_url", "http://homeassistant:8123").replace(/\/+$/, "");
-  if (!/^https?:\/\//.test(haUrl)) throw new ConfigError(`Option ha_url must start with http:// or https://, got ${haUrl}`);
+  const haUrl = str(raw, "ha_url", "").replace(/\/+$/, "");
+  if (haUrl !== "" && !/^https?:\/\//.test(haUrl)) {
+    throw new ConfigError(`Option ha_url must start with http:// or https://, got ${haUrl}`);
+  }
   const accessToken = str(raw, "access_token", "");
 
-  const rotationStr = oneOf(raw, "rotation", "0", ["0", "90", "180", "270"] as const);
+  const rotationStr = oneOf(raw, "rotation", "90", ["0", "90", "180", "270"] as const);
 
   return {
     haUrl,
     accessToken,
     dashboardPath: normalisePath(str(raw, "dashboard_path", "/dashboard-test-2")),
     urlQuery: str(raw, "url_query", ""),
-    width: Math.round(num(raw, "width", 1264, 100, 4096)),
-    height: Math.round(num(raw, "height", 1680, 100, 4096)),
+    width: Math.round(num(raw, "width", OASIS_LONG_EDGE, 100, 4096)),
+    height: Math.round(num(raw, "height", OASIS_SHORT_EDGE, 100, 4096)),
     rotation: Number(rotationStr) as Rotation,
     zoom: num(raw, "zoom", 1.0, 0.25, 4.0),
     intervalSeconds: Math.round(num(raw, "interval", 60, 10, 86400)),
@@ -142,6 +154,8 @@ export function buildConfig(fileOptions: RawOptions, env: NodeJS.ProcessEnv = pr
     chromiumPath: str(raw, "chromium_path", "/usr/bin/chromium-browser"),
     renderTimeoutMs: Math.round(num(raw, "render_timeout_ms", 45000, 1000, 600000)),
     logLevel: oneOf(raw, "log_level", "info", ["debug", "info", "warn", "error"] as const),
+    errorScreenshotPath: str(raw, "error_screenshot", "/data/last-error.png"),
+    haUrlSource: haUrl ? "option" : "unresolved",
   };
 }
 

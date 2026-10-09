@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { buildConfig } from "../src/config.js";
 import { createApp, RenderState } from "../src/server.js";
 import type { Renderer, RenderResult } from "../src/renderer.js";
@@ -79,6 +82,27 @@ describe("HTTP server", () => {
 
     it("unknown paths are 404", async () => {
       expect((await fetch(`${base}/nope`)).status).toBe(404);
+    });
+  });
+
+  describe("/last-error.png", () => {
+    it("is 404 until a failed render was captured, then serves the file", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "kindledash-"));
+      const file = join(dir, "last-error.png");
+      const cfg = buildConfig({}, { KD_ERROR_SCREENSHOT: file });
+      const app = createApp(new RenderState(fakeRenderer(), cfg), cfg);
+      server = createServer((req, res) => void app(req, res));
+      base = await listen(server);
+
+      expect((await fetch(`${base}/last-error.png`)).status).toBe(404);
+
+      const png = encodeGrayPng({ width: 1, height: 1, data: new Uint8Array([0]) });
+      await writeFile(file, png);
+      const res = await fetch(`${base}/last-error.png`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/png");
+      expect(Buffer.from(await res.arrayBuffer())).toEqual(png);
+      await rm(dir, { recursive: true, force: true });
     });
   });
 

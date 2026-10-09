@@ -1,6 +1,6 @@
 {
   "name": "kindledash-renderer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Renders a Home Assistant dashboard into an e-ink friendly PNG for a jailbroken Kindle.",
   "type": "module",
