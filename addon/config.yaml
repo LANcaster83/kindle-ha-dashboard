@@ -1,6 +1,6 @@
 # https://developers.home-assistant.io/docs/apps/configuration
 name: Kindle Dashboard Renderer
-version: "0.2.0"
+version: "0.2.1"
 slug: kindledash
 description: Renders a Lovelace dashboard with headless Chromium into an e-ink friendly PNG for a jailbroken Kindle.
 url: https://github.com/LANcaster83/kindle-ha-dashboard/tree/main/addon
@@ -40,7 +40,9 @@ options:
   contrast: 1.15
   server_token: ""
 schema:
-  ha_url: url?
+  # str, not url: the configuration UI sends "" for a cleared field, which `url?` rejects.
+  # The app validates the value and treats "" like absent (auto-detection).
+  ha_url: str?
   access_token: password
   dashboard_path: str
   url_query: str?
