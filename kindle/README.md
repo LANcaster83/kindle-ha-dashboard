@@ -16,6 +16,13 @@ kindledash/
 └── log/              created at runtime
 ```
 
+Orientation: on Kindle, `fbink -g` copies the PNG 1:1 into the framebuffer and
+never rotates it (`FBINK_NO_SW_ROTA` only exists for PocketBook/Kobo builds).
+The Oasis framebuffer is portrait, 1264x1680, whenever the Home screen or KUAL
+is in front, so the renderer app ships the landscape dashboard already rotated
+(`rotation: 90`). The daemon logs `Frame WxH, framebuffer WxH` after the first
+fetch and warns on screen when the image would be cropped.
+
 `fbink` is not bundled. The daemon looks for `bin/fbink` inside the extension,
 then for KOReader's copy at `/mnt/us/koreader/fbink`, and falls back to the
 firmware's `eips`. KOReader is installed on the target device, so nothing else

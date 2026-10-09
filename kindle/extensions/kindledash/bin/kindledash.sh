@@ -34,7 +34,6 @@ HTTP_TIMEOUT=30
 MAX_RUNTIME=0
 FBINK_BIN=""
 FBINK_IMG_OPTS="halign=CENTER,valign=CENTER"
-FBINK_NO_SW_ROTA=0
 UI_MODE="keep"
 WIFI_TEST_HOST=""
 
@@ -83,11 +82,6 @@ FBINK_SRC="$(find_fbink)"
 FBINK=""
 if [ -n "${FBINK_SRC}" ]; then
     cp -f "${FBINK_SRC}" "${RUN_DIR}/fbink" && chmod 755 "${RUN_DIR}/fbink" && FBINK="${RUN_DIR}/fbink"
-fi
-if [ "${FBINK_NO_SW_ROTA}" = "1" ]; then
-    export FBINK_NO_SW_ROTA=1
-else
-    unset FBINK_NO_SW_ROTA
 fi
 
 HTTP_CLIENT=""
@@ -148,6 +142,37 @@ http_post_json() {
 
 is_png() {
     [ -s "$1" ] && [ "$(head -c 8 "$1" | od -An -tx1 | tr -d ' \n')" = "89504e470d0a1a0a" ]
+}
+
+png_size() {
+    # Prints "WxH" from the PNG IHDR chunk (bytes 16-23, big endian).
+    hex="$(od -An -tx1 -j16 -N8 "$1" 2>/dev/null | tr -d ' \n')"
+    [ "${#hex}" -eq 16 ] || return 1
+    printf '%dx%d' "0x$(echo "${hex}" | cut -c1-8)" "0x$(echo "${hex}" | cut -c9-16)"
+}
+
+fb_geometry() {
+    # Prints "WxH rota=N" of the framebuffer as fbink sees it (fbink draws 1:1, no rotation on Kindle).
+    [ -n "${FBINK}" ] || return 1
+    state="$("${FBINK}" -e 2>/dev/null | tr ';' '\n')"
+    w="$(echo "${state}" | sed -n 's/^viewWidth=//p')"
+    h="$(echo "${state}" | sed -n 's/^viewHeight=//p')"
+    r="$(echo "${state}" | sed -n 's/^currentRota=//p')"
+    [ -n "${w}" ] && [ -n "${h}" ] || return 1
+    printf '%sx%s rota=%s' "${w}" "${h}" "${r:-?}"
+}
+
+check_geometry() {
+    # $1 = png path. Logs frame vs framebuffer size and warns when the image would be cropped.
+    img="$(png_size "$1")" || return 0
+    fb="$(fb_geometry)" || { log "Frame ${img}, framebuffer unknown (no fbink)"; return 0; }
+    log "Frame ${img}, framebuffer ${fb}"
+    iw="${img%x*}"; ih="${img#*x}"
+    fbw="${fb%%x*}"; fbh="${fb#*x}"; fbh="${fbh%% *}"
+    if [ "${iw}" -gt "${fbw}" ] || [ "${ih}" -gt "${fbh}" ]; then
+        log "WARNING: frame ${img} is larger than the framebuffer ${fbw}x${fbh}: it will be cropped. Landscape dashboard on a portrait framebuffer? Set rotation: 90 (or 270) in the app, keep width 1680 x height 1264."
+        say " image ${img} > screen ${fbw}x${fbh}: set rotation 90 in app "
+    fi
 }
 
 battery_level() {
@@ -255,6 +280,7 @@ if [ "${ONCE}" = "1" ]; then
     fi
     if http_get "${IMAGE_URL}?token=${TOKEN}" "${RUN_DIR}/once.png" && is_png "${RUN_DIR}/once.png"; then
         draw_image "${RUN_DIR}/once.png" 1
+        check_geometry "${RUN_DIR}/once.png"
         log "Fetch once OK"
     else
         log "Fetch once failed"
@@ -292,6 +318,7 @@ CUR_PNG="${RUN_DIR}/current.png"
 TMP_PNG="${RUN_DIR}/next.png"
 frame=0
 failures=0
+checked=0
 started_at="$(date +%s)"
 last_report=0
 
@@ -316,6 +343,10 @@ while :; do
         fi
         failures=0
         draw_image "${CUR_PNG}" "${full}"
+        if [ "${checked}" = "0" ]; then
+            check_geometry "${CUR_PNG}"
+            checked=1
+        fi
         frame=$((frame + 1))
     else
         failures=$((failures + 1))

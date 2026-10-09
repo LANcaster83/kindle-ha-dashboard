@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { loadConfig, redactConfig, type Config } from "./config.js";
+import { resolveHaUrl } from "./haurl.js";
 import { log, setLogLevel } from "./log.js";
 import { createRenderer, type Renderer, type RenderResult } from "./renderer.js";
 
@@ -22,7 +24,7 @@ export interface Status {
   version: string;
 }
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 /** Mutable state shared between the scheduler and the HTTP handlers. */
 export class RenderState {
@@ -114,14 +116,27 @@ function sendJson(res: ServerResponse, code: number, body: unknown): void {
   res.end(payload);
 }
 
-function indexHtml(status: Status): string {
+function indexHtml(status: Status, cfg: Config): string {
   const ts = status.last_render ?? "never";
+  const orientation =
+    cfg.rotation === 0
+      ? `Dashboard viewport ${cfg.width}x${cfg.height}, served as is.`
+      : `Dashboard viewport ${cfg.width}x${cfg.height}, served rotated by ${cfg.rotation}° for the Kindle framebuffer.`;
+  const errorNote = status.last_error
+    ? `<p><b>Last error:</b> ${escapeHtml(status.last_error)} · <a href="/last-error.png">last-error.png</a></p>`
+    : "";
   return `<!doctype html><html><head><meta charset="utf-8"><title>Kindle Dashboard Renderer</title>
-<style>body{font-family:sans-serif;margin:1rem;background:#eee}img{max-width:100%;border:1px solid #999;background:#fff}pre{background:#fff;padding:.5rem}</style></head>
+<style>body{font-family:sans-serif;margin:1rem;background:#eee}img{max-width:100%;max-height:90vh;border:1px solid #999;background:#fff}pre{background:#fff;padding:.5rem}</style></head>
 <body><h1>Kindle Dashboard Renderer</h1>
-<p>Last render: ${ts}. <a href="/kindle.png">kindle.png</a> · <a href="/status">status</a> · <form style="display:inline" method="post" action="/render"><button>Render now</button></form></p>
+<p>Last render: ${ts}. <a href="/kindle.png">kindle.png</a> · <a href="/status">status</a> · <a href="/config">config</a> · <form style="display:inline" method="post" action="/render"><button>Render now</button></form></p>
+<p>${orientation} Home Assistant: ${escapeHtml(cfg.haUrl)} (${escapeHtml(cfg.haUrlSource)}).</p>
+${errorNote}
 <p><img src="/kindle.png?ts=${Date.now()}" alt="dashboard"></p>
 <pre>${JSON.stringify(status, null, 2)}</pre></body></html>`;
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
 export function createApp(state: RenderState, cfg: Config) {
@@ -142,7 +157,19 @@ export function createApp(state: RenderState, cfg: Config) {
 
     if (path === "/" && method === "GET") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(indexHtml(state.status()));
+      res.end(indexHtml(state.status(), cfg));
+      return;
+    }
+
+    if (path === "/last-error.png" && method === "GET") {
+      try {
+        const png = cfg.errorScreenshotPath ? await readFile(cfg.errorScreenshotPath) : null;
+        if (!png) throw new Error("disabled");
+        res.writeHead(200, { "Content-Type": "image/png", "Content-Length": png.length, "Cache-Control": "no-store" });
+        res.end(png);
+      } catch {
+        sendJson(res, 404, { error: "no failed render has been captured yet" });
+      }
       return;
     }
 
@@ -231,12 +258,18 @@ export function startScheduler(state: RenderState, intervalSeconds: number): () 
 }
 
 async function main(): Promise<void> {
-  const cfg = loadConfig();
-  setLogLevel(cfg.logLevel);
-  log.info(`kindledash renderer ${VERSION} starting`, redactConfig(cfg));
-  if (!cfg.accessToken) {
+  const loaded = loadConfig();
+  setLogLevel(loaded.logLevel);
+  log.info(`kindledash renderer ${VERSION} starting`, redactConfig(loaded));
+  if (!loaded.accessToken) {
     log.error("No access_token configured. Create a long-lived access token in Home Assistant and set it in the app options.");
   }
+
+  const resolved = await resolveHaUrl(loaded.haUrl, process.env);
+  const cfg: Config = { ...loaded, haUrl: resolved.url, haUrlSource: resolved.source };
+  const line = `Home Assistant URL: ${cfg.haUrl} (${resolved.detail})`;
+  if (resolved.source === "default") log.warn(line);
+  else log.info(line);
 
   const renderer = createRenderer(cfg);
   const state = new RenderState(renderer, cfg);
