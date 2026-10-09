@@ -15,6 +15,8 @@ export interface Status {
   last_error_at: string | null;
   render_count: number;
   error_count: number;
+  /** Failures since the last successful render; 0 while renders succeed. */
+  consecutive_errors: number;
   image_width: number | null;
   image_height: number | null;
   image_bytes: number | null;
@@ -24,7 +26,7 @@ export interface Status {
   version: string;
 }
 
-export const VERSION = "0.2.0";
+export const VERSION = "0.2.1";
 
 /** Mutable state shared between the scheduler and the HTTP handlers. */
 export class RenderState {
@@ -34,6 +36,7 @@ export class RenderState {
   lastErrorAt: Date | null = null;
   renderCount = 0;
   errorCount = 0;
+  consecutiveErrors = 0;
   rendering: Promise<RenderResult> | null = null;
   nextRenderAt: Date | null = null;
   private readonly startedAt = Date.now();
@@ -52,12 +55,14 @@ export class RenderState {
         this.last = res;
         this.etag = `"${createHash("sha1").update(res.png).digest("hex")}"`;
         this.renderCount += 1;
+        this.consecutiveErrors = 0;
         this.lastError = null;
         log.info(`Rendered ${res.width}x${res.height} (${res.png.length} bytes) in ${res.durationMs} ms`);
         return res;
       })
       .catch((err: unknown) => {
         this.errorCount += 1;
+        this.consecutiveErrors += 1;
         this.lastError = err instanceof Error ? err.message : String(err);
         this.lastErrorAt = new Date();
         log.error("Render failed", err);
@@ -79,6 +84,7 @@ export class RenderState {
       last_error_at: this.lastErrorAt?.toISOString() ?? null,
       render_count: this.renderCount,
       error_count: this.errorCount,
+      consecutive_errors: this.consecutiveErrors,
       image_width: this.last?.width ?? null,
       image_height: this.last?.height ?? null,
       image_bytes: this.last?.png.length ?? null,

@@ -18,7 +18,20 @@ export interface Renderer {
   close(): Promise<void>;
 }
 
-export type RenderErrorKind = "login" | "not-frontend" | "navigation";
+export type RenderErrorKind = "login" | "not-frontend" | "navigation" | "timeout" | "browser";
+
+/** Steps of one render attempt, in order; named in timeout errors so the log says where time went. */
+export type RenderPhase =
+  | "launch"
+  | "new-page"
+  | "setup"
+  | "navigate"
+  | "probe"
+  | "wait-dashboard"
+  | "prepare"
+  | "settle"
+  | "screenshot"
+  | "process";
 
 /** A render failure with a classified cause, so callers and tests can tell them apart. */
 export class RenderError extends Error {
@@ -26,10 +39,30 @@ export class RenderError extends Error {
     message: string,
     readonly kind: RenderErrorKind,
     readonly httpStatus: number | null = null,
+    readonly phase: RenderPhase | null = null,
   ) {
     super(message);
     this.name = "RenderError";
   }
+}
+
+/** Puppeteer's own timeouts: a CDP call past `protocolTimeout` or a navigation/wait past its timeout. */
+export function isProtocolTimeout(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return err.name === "TimeoutError" || /timed out|timeout of \d+ ?ms exceeded/i.test(err.message);
+}
+
+/**
+ * Rejects with `onTimeout()` when `work` has not settled within `ms`. The abandoned promise is
+ * still allowed to settle later (e.g. once Chromium is killed) without an unhandled rejection.
+ */
+export function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const expiry = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), ms);
+  });
+  work.catch(() => undefined);
+  return Promise.race([work, expiry]).finally(() => clearTimeout(timer));
 }
 
 /** What we learn about the document after navigation; input to classifyPage(). */
@@ -130,12 +163,19 @@ const HIDE_HEADER_SCRIPT = `
 /** Upper bound for waiting until hui-root shows up; non-Lovelace panels never produce it. */
 const DASHBOARD_WAIT_MS = 20_000;
 const ERROR_SCREENSHOT_TIMEOUT_MS = 10_000;
+/** A page or browser that does not close within this is treated as hung and Chromium is killed. */
+const CLOSE_TIMEOUT_MS = 5_000;
+/** How long a probe retry waits after "Execution context was destroyed". */
+const PROBE_RETRY_DELAY_MS = 500;
 
 async function launchBrowser(cfg: Config): Promise<Browser> {
   log.info(`Launching Chromium at ${cfg.chromiumPath}`);
   return puppeteer.launch({
     executablePath: cfg.chromiumPath,
     headless: true,
+    // Every CDP call (Runtime.evaluate, Page.captureScreenshot, Target.closeTarget, ...) fails after this
+    // instead of puppeteer's default 180 s; a hung page then costs at most one render_timeout_ms.
+    protocolTimeout: cfg.renderTimeoutMs,
     // Self-signed certificates on https://homeassistant are common; the token is scoped to that origin anyway.
     acceptInsecureCerts: true,
     args: [
@@ -196,21 +236,51 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 /**
  * Inspects the current document. The frontend may still be redirecting (e.g. to the login page)
- * right after `load`, which destroys the execution context; retry a few times instead of failing.
+ * right after `load`, which destroys the execution context; retry until `deadline` instead of
+ * failing. A protocol timeout is not retried: the page is hung and every retry would cost another
+ * protocolTimeout (0.2.0 spent 4 x 180 s here, which is where the 16-minute stalls came from).
  */
-async function probePage(page: Page, status: number | null): Promise<PageProbe> {
-  let lastErr: unknown = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
+async function probePage(page: Page, status: number | null, deadline: number): Promise<PageProbe> {
+  for (let attempt = 1; ; attempt++) {
     try {
       const probe = (await page.evaluate(PROBE_SCRIPT)) as Omit<PageProbe, "status">;
       return { ...probe, status };
     } catch (err) {
-      lastErr = err;
-      await sleep(500);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (isProtocolTimeout(err)) {
+        throw new RenderError(`The loaded page did not answer Runtime.evaluate: ${msg}`, "timeout", status, "probe");
+      }
+      if (Date.now() + PROBE_RETRY_DELAY_MS >= deadline || attempt >= 4) {
+        throw new RenderError(`Could not inspect the loaded page: ${msg}`, "navigation", status, "probe");
+      }
+      log.debug(`Page inspection failed (attempt ${attempt}), retrying`, err);
+      await sleep(PROBE_RETRY_DELAY_MS);
     }
   }
-  const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
-  throw new RenderError(`Could not inspect the loaded page: ${msg}`, "navigation", status);
+}
+
+/** Wraps anything thrown inside a render attempt into a RenderError that names the phase. */
+function toRenderError(err: unknown, phase: RenderPhase): RenderError {
+  if (err instanceof RenderError) return err;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (isProtocolTimeout(err)) return new RenderError(`Chromium did not answer during ${phase}: ${msg}`, "timeout", null, phase);
+  return new RenderError(`Render failed during ${phase}: ${msg}`, "browser", null, phase);
+}
+
+/** Kills the Chromium process (and its process group, as puppeteer spawns it detached). */
+function killBrowserProcess(b: Browser): void {
+  const proc = b.process();
+  if (!proc || proc.pid === undefined || proc.exitCode !== null) return;
+  try {
+    process.kill(-proc.pid, "SIGKILL");
+  } catch {
+    // not a group leader (or already gone): fall through to the plain kill
+  }
+  try {
+    proc.kill("SIGKILL");
+  } catch {
+    // already exited
+  }
 }
 
 async function saveErrorScreenshot(page: Page, cfg: Config): Promise<void> {
@@ -227,73 +297,129 @@ async function saveErrorScreenshot(page: Page, cfg: Config): Promise<void> {
   }
 }
 
-export function createRenderer(cfg: Config): Renderer {
+export interface RendererDeps {
+  /** Starts Chromium; replaced by a fake in tests. */
+  launch?: (cfg: Config) => Promise<Browser>;
+  /** Bound for page.close()/browser.close() before Chromium is killed; shortened in tests. */
+  closeTimeoutMs?: number;
+}
+
+export function createRenderer(cfg: Config, deps: RendererDeps = {}): Renderer {
+  const launch = deps.launch ?? launchBrowser;
+  const closeTimeoutMs = deps.closeTimeoutMs ?? CLOSE_TIMEOUT_MS;
   let browser: Browser | null = null;
 
   async function getBrowser(): Promise<Browser> {
     if (browser && browser.connected) return browser;
-    browser = await launchBrowser(cfg);
-    browser.on("disconnected", () => {
-      log.warn("Chromium disconnected; it will be relaunched on the next render");
-      browser = null;
+    const b = await launch(cfg);
+    b.on("disconnected", () => {
+      // Only forget it if it is still the current one; a replacement may already be running.
+      if (browser === b) {
+        log.warn("Chromium disconnected; it will be relaunched on the next render");
+        browser = null;
+      }
     });
-    return browser;
+    browser = b;
+    return b;
+  }
+
+  /** Drops the current Chromium: graceful close bounded by closeTimeoutMs, then SIGKILL. */
+  async function discardBrowser(reason: string): Promise<void> {
+    const b = browser;
+    browser = null;
+    if (!b) return;
+    log.warn(`Discarding Chromium (${reason}); it will be relaunched on the next render`);
+    try {
+      await withDeadline(b.close(), closeTimeoutMs, () => new Error("Browser.close timed out"));
+    } catch (err) {
+      log.warn("Chromium did not close in time, killing it", err);
+      killBrowserProcess(b);
+    }
+  }
+
+  /** Closes a page; a page that does not close in time means Chromium is stuck, so it is discarded. */
+  async function closePage(page: Page): Promise<void> {
+    if (page.isClosed()) return;
+    try {
+      await withDeadline(page.close(), closeTimeoutMs, () => new Error("Target.closeTarget timed out"));
+    } catch (err) {
+      await discardBrowser(`page did not close: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async function renderOnce(): Promise<RenderResult> {
     const started = Date.now();
-    const b = await getBrowser();
-    const page = await b.newPage();
-    try {
-      page.setDefaultTimeout(cfg.renderTimeoutMs);
-      await page.emulateMediaFeatures([{ name: "prefers-color-scheme", value: cfg.colorScheme }]);
+    const deadline = started + cfg.renderTimeoutMs;
+    let phase: RenderPhase = "launch";
+    let page: Page | null = null;
+
+    const attempt = async (): Promise<RenderResult> => {
+      const b = await getBrowser();
+      phase = "new-page";
+      const p = await b.newPage();
+      page = p;
+      phase = "setup";
+      p.setDefaultTimeout(cfg.renderTimeoutMs);
+      await p.emulateMediaFeatures([{ name: "prefers-color-scheme", value: cfg.colorScheme }]);
       // width x height is the dashboard viewport; `rotation` only turns the finished PNG.
       const viewport = { width: cfg.width, height: cfg.height };
-      await page.setViewport({ ...viewport, deviceScaleFactor: 1 });
-      await seedAuth(page, cfg);
+      await p.setViewport({ ...viewport, deviceScaleFactor: 1 });
+      await seedAuth(p, cfg);
 
+      phase = "navigate";
       const url = dashboardUrl(cfg);
       log.debug(`Navigating to ${url}`);
       // "load" only: HA keeps a websocket open, so network-idle heuristics time out on healthy pages.
-      const response = await page.goto(url, { waitUntil: "load", timeout: cfg.renderTimeoutMs }).catch((err: unknown) => {
+      const response = await p.goto(url, { waitUntil: "load", timeout: cfg.renderTimeoutMs }).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
-        throw new RenderError(`Could not load ${url}: ${msg}`, "navigation");
+        throw new RenderError(`Could not load ${url}: ${msg}`, "navigation", null, "navigate");
       });
       const status = response ? response.status() : null;
-      const problem = classifyPage(await probePage(page, status), url);
+
+      phase = "probe";
+      const problem = classifyPage(await probePage(p, status, deadline), url);
       if (problem) throw problem;
 
-      const state = await page
-        .waitForFunction(DASHBOARD_STATE, { timeout: Math.min(DASHBOARD_WAIT_MS, cfg.renderTimeoutMs), polling: 250 })
+      phase = "wait-dashboard";
+      // Never spend the whole remaining budget here: a non-Lovelace page must still get its screenshot.
+      const waitMs = Math.max(0, Math.min(DASHBOARD_WAIT_MS, (deadline - Date.now()) / 2));
+      const state = await p
+        .waitForFunction(DASHBOARD_STATE, { timeout: waitMs, polling: 250 })
         .then((handle) => handle.jsonValue())
         .catch(() => null);
       if (state !== "ready") {
         // Either not a Lovelace dashboard, or the frontend rejected the token meanwhile and went to the login page.
-        const late = classifyPage(await probePage(page, null), url);
+        phase = "probe";
+        const late = classifyPage(await probePage(p, null, deadline), url);
         if (late) throw late;
         log.debug("hui-root did not appear in time; not a Lovelace dashboard? Rendering anyway");
       }
 
+      phase = "prepare";
       if (cfg.zoom !== 1) {
-        await page.addStyleTag({ content: `body { zoom: ${cfg.zoom * 100}%; }` });
+        await p.addStyleTag({ content: `body { zoom: ${cfg.zoom * 100}%; }` });
       }
       if (cfg.hideHeader) {
         try {
-          const found = await page.evaluate(HIDE_HEADER_SCRIPT);
+          const found = await p.evaluate(HIDE_HEADER_SCRIPT);
           if (!found) log.debug("hui-root not found; header not hidden (not a Lovelace dashboard?)");
         } catch (err) {
+          if (isProtocolTimeout(err)) throw err;
           log.warn("Hiding header failed", err);
         }
       }
-      if (cfg.renderDelayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, cfg.renderDelayMs));
-      }
 
-      const shot = await page.screenshot({
+      phase = "settle";
+      if (cfg.renderDelayMs > 0) await sleep(cfg.renderDelayMs);
+
+      phase = "screenshot";
+      const shot = await p.screenshot({
         type: "png",
         captureBeyondViewport: false,
         clip: { x: 0, y: 0, ...viewport },
       });
+
+      phase = "process";
       const processed = processScreenshot(Buffer.from(shot), {
         rotation: cfg.rotation,
         contrast: cfg.contrast,
@@ -307,24 +433,34 @@ export function createRenderer(cfg: Config): Renderer {
         renderedAt: new Date(),
         durationMs: Date.now() - started,
       };
+    };
+
+    let result: RenderResult;
+    try {
+      // Hard bound for the whole attempt: no single step (or retry loop) may exceed render_timeout_ms.
+      result = await withDeadline(
+        attempt(),
+        cfg.renderTimeoutMs,
+        () => new RenderError(`Render timed out after ${cfg.renderTimeoutMs} ms during ${phase}`, "timeout", null, phase),
+      );
     } catch (err) {
-      await saveErrorScreenshot(page, cfg);
-      throw err;
-    } finally {
-      await page.close().catch(() => undefined);
+      const failure = toRenderError(err, phase);
+      if (failure.kind === "timeout") {
+        // The page (or Chromium) is not answering: a screenshot or a graceful close would only hang too.
+        await discardBrowser(`render timed out during ${failure.phase ?? phase}`);
+      } else {
+        if (page) await saveErrorScreenshot(page, cfg);
+        if (page) await closePage(page);
+        else if (browser && !browser.connected) browser = null;
+      }
+      throw failure;
     }
+    if (page) await closePage(page);
+    return result;
   }
 
   return {
-    async render() {
-      try {
-        return await renderOnce();
-      } catch (err) {
-        // A crashed or hung browser is the most common failure: drop it so the retry relaunches.
-        if (browser && !browser.connected) browser = null;
-        throw err;
-      }
-    },
+    render: renderOnce,
     async close() {
       if (browser) {
         const b = browser;
