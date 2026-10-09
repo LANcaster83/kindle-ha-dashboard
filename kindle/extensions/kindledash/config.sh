@@ -34,7 +34,11 @@ HTTP_TIMEOUT=30
 MAX_RUNTIME=0
 
 # --- Display ------------------------------------------------------------------
-# Path to fbink. Empty = auto-detect (bin/fbink, then KOReader's copy, then eips fallback).
+# Path to fbink. Empty = auto-detect: bin/fbink inside the extension, then the
+# copy installed by the KindleModding hotfix (/mnt/us/libkh/bin/fbink, full build),
+# then KOReader's (/mnt/us/koreader/fbink). Copies built without image support
+# (KOReader's is, MINIMAL=1) are skipped and logged; with no usable fbink the
+# daemon falls back to the firmware's eips -g.
 FBINK_BIN=""
 # Extra fbink -g image options (comma separated). Add w=-2,h=-2 to scale to fit the screen.
 FBINK_IMG_OPTS="halign=CENTER,valign=CENTER"
@@ -48,9 +52,11 @@ FBINK_IMG_OPTS="halign=CENTER,valign=CENTER"
 # Default mode when started without an argument:
 #   keep           leave the Kindle UI alone; "Stop dashboard" in KUAL works. The status
 #                  bar clock may redraw over the image until the next frame.
-#   freeze         disable the status bar (pillow) and freeze the window manager,
-#                  like KOReader does. Clean image; exit by holding the power button.
-#   stop_framework stop the whole Kindle GUI (lowest CPU/RAM). Exit by holding the power button.
+#   stop_framework stop the whole Kindle GUI (lowest CPU/RAM, nothing redraws over
+#                  the image). KUAL is gone too: to stop, create a file named STOP
+#                  in this folder over USB and eject (the daemon restores the GUI
+#                  within INTERVAL seconds), or restart the Kindle (hold power ~40 s).
+# (The former "freeze" mode froze the Kindle on FW 5.16 and was removed.)
 UI_MODE="keep"
 
 # Host to ping while waiting for Wi-Fi. Empty = host part of IMAGE_URL.
