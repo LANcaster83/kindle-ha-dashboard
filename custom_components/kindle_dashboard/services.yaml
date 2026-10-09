@@ -1,0 +1,3 @@
+render:
+  name: Render now
+  description: Ask the kindledash renderer to produce a fresh dashboard image immediately.

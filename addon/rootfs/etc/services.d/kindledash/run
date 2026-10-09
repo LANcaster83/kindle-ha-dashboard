@@ -1,0 +1,17 @@
+#!/usr/bin/with-contenv bashio
+# ==============================================================================
+# Start the Kindle dashboard renderer.
+# Options are read by the Node process from /data/options.json (HAOS) or from
+# KD_* environment variables (compose / local development).
+# ==============================================================================
+set -e
+
+if bashio::fs.file_exists /data/options.json; then
+  bashio::log.info "Starting kindledash renderer with options from /data/options.json"
+else
+  bashio::log.info "Starting kindledash renderer with options from environment"
+fi
+
+export CHROMIUM_PATH="${CHROMIUM_PATH:-/usr/bin/chromium-browser}"
+cd /app
+exec node /app/dist/server.js

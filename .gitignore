@@ -1,0 +1,23 @@
+# secrets
+.env
+*.env
+!.env.example
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-store/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# local artifacts
+*.log
+/out/
+/tmp/
