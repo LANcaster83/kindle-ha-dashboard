@@ -36,8 +36,11 @@ sensor fed by the Kindle, "last seen" / "last render" diagnostics and a
 ## Requirements
 
 - Home Assistant OS (tested target: HAOS VM at `http://10.3.0.104`) with HACS.
-  The app is built on the x86-64/aarch64 HA base image; Chromium needs roughly
-  300 MB of RAM while rendering.
+  The app is built on the x86-64/aarch64 HA base image. Give the host **at
+  least 4 vCPU and 4 GB RAM**: on a 2 vCPU / 2 GB VM headless Chromium timed
+  out on almost every render and only about one frame in ten reached the
+  Kindle; with 4 vCPU / 4 GB the same setup renders every minute with zero
+  timeouts and zero errors. See [Tuning](#tuning-what-worked-on-the-oasis-2).
 - Kindle Oasis (2017/2019, 1264x1680 @ 300 ppi) with firmware 5.16.x,
   jailbroken (WinterBreak), with **KUAL** installed. **KOReader** is used for
   its bundled `fbink`; if you do not want KOReader, see
@@ -75,7 +78,10 @@ then Settings → Apps → App store → ⋮ → *Check for updates*. It shows u
      the log warns, to the URL HA really answers on, e.g. `http://10.3.0.104`
      (not `:8123` on this host).
    - `width`/`height`/`rotation`: `1680`/`1264`/`90` (default) is a landscape
-     dashboard for the Oasis, see [Orientation](#orientation) below.
+     dashboard for the Oasis; `270` if the page buttons end up on the wrong
+     side, see [Orientation](#orientation) below.
+   - `zoom`: `1.5` on the 300 ppi Oasis, `contrast`: `0.95` looked best on
+     the real panel, see [Tuning](#tuning-what-worked-on-the-oasis-2).
    - Optional: `server_token` (random string) to protect the app's own port.
 3. *Start*. Open the *Web UI* (`http://10.3.0.104:8080/`) to see the preview
    and status; `http://10.3.0.104:8080/kindle.png` is the image. The log says
@@ -169,12 +175,35 @@ From the Linux dev box (vfat, mount as your user so the copy is writable):
   (landscape exists only inside the stock reader), so a landscape dashboard
   must arrive already rotated. That is the app default: viewport `1680x1264`,
   `rotation: 90`, giving a 1264x1680 PNG.
-- Dashboard upside down for the hand you hold it in (page-turn buttons on the
-  wrong side)? Set `rotation: 270` in the app.
-- Portrait dashboard: `width: 1264`, `height: 1680`, `rotation: 0` (or `180`).
-- The daemon logs `Frame WxH, framebuffer WxH` after the first fetch
-  (`Show status / log`) and prints a warning on screen when the frame is larger
-  than the framebuffer (it would be cropped).
+- **The Oasis flips its framebuffer by 180°** when you turn the device over:
+  the framework follows the accelerometer and switches the framebuffer
+  rotation between `rota=0` and `rota=2` (both seen in this device's log).
+  Nothing in the PNG changes, so a fixed `rotation` was right in one state and
+  upside down in the other ("sometimes 90 is right, sometimes 270"). Since
+  0.2.2 the daemon reads the rotation with `fbink -e` before every fetch and
+  asks the app for a counter-rotated frame (`?fb_rotate=N`, served from the
+  cached render, no re-render); while waiting for the next frame it re-checks
+  every `ROTATION_POLL` (5 s) and fetches at once when the rotation changed.
+- **What to set**: `rotation` in the app is the base orientation for
+  `rota=0`. Start the dashboard, read `fb rota=` from `Show status / log`. If
+  the log says `rota=0` and the page buttons are on the wrong side, switch
+  `rotation` between `90` and `270` and restart the app. If the log says
+  `rota=2`, turn the Kindle over or wait for the next frame (the daemon
+  compensates) before judging. For buttons at the bottom this device uses
+  `270` (the user's finding; verify once with the log as above).
+- Portrait dashboard: `width: 1264`, `height: 1680`, `rotation: 0` (or `180`);
+  the same compensation applies.
+- Optional `ORIENTATION_LOCK="U"` in `config.sh` additionally asks the window
+  manager to stop following the accelerometer
+  (`lipc-set-prop com.lab126.winmgr orientationLock U`, restored on stop). It
+  is not needed for a correct picture and is unverified on firmware 5.16; the
+  log reports whether the call was accepted.
+- The daemon logs `Orientation: fb rota=N winmgr orientation=… accelerometer=…
+  orientationLock=…` at start, `Frame WxH, framebuffer WxH rota=N` after the
+  first fetch, `Drew frame n (fb rota=N, fb_rotate=N, full=…)` for every
+  frame, and `Framebuffer rotation changed: rota 0 -> 2` when it flips. It
+  prints a warning on screen when the frame is larger than the framebuffer
+  (it would be cropped).
 
 ### Run
 
@@ -201,10 +230,46 @@ bottom. Below `LOW_BATTERY_PERCENT` a `battery N%` marker is shown.
 
 Logs: `/mnt/us/extensions/kindledash/log/kindledash.log`. Each start logs the
 tools it found (`Tools: http=… fbink=… eips=… lipc=…`), the battery source,
-the frame vs framebuffer geometry, the first successful draw (`Drew … with …`)
-and every failed `fbink`/`eips`/`lipc-set-prop` call with its exit code and
-stderr. "Fetch once OK" without a "Drew" line before it never happens any more:
+the orientation state, the frame vs framebuffer geometry, every drawn frame
+with the framebuffer rotation it was fetched for, and every failed
+`fbink`/`eips`/`lipc-set-prop` call with its exit code and stderr. "Fetch once OK" without a "Drew" line before it never happens any more:
 a fetched-but-not-drawn frame is reported as such on screen and in the log.
+
+## Tuning: what worked on the Oasis 2
+
+Real numbers from the reference deployment (HAOS VM, HA on port 80, Kindle
+Oasis 2 on firmware 5.16.2.1.1, `/dashboard-test-2`):
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| HAOS VM | **4 vCPU / 4 GB RAM** | With 2 vCPU / 2 GB headless Chromium timed out constantly and only every ~10th frame rendered; with 4/4 zero timeouts and zero errors over the same dashboard. |
+| `width` / `height` | `1680` / `1264` | Landscape viewport for the 1264x1680 panel. |
+| `rotation` | `270` | Page buttons at the bottom in this mount (`90` puts them at the top). The daemon compensates the Oasis 180° flips, see [Orientation](#orientation). |
+| `zoom` | `1.5` | At 300 ppi the cards are tiny at 1.0; 2.0 was too much. |
+| `contrast` | `0.95` | The default 1.15 was too harsh on the real panel with the default dithering. |
+| `interval` | `60` | `INTERVAL=60` on the Kindle to match. |
+| `ha_url` | empty | Auto-detected via the Supervisor; HA listens on port 80 here. |
+| `gray_levels` / `dither` | `16` / `true` | Defaults. |
+
+Symptoms of a host that is too small, before you touch anything else:
+
+- app log: `Render timed out after 45000 ms during <phase>` (typically
+  `navigate`, `wait-dashboard` or `screenshot`) on most renders;
+- `/status`: `render_count` growing much slower than one per `interval` and
+  `consecutive_errors` above 0;
+- HA: `sensor.<name>_renderer_status` flapping between `ok` and `error`, the
+  Kindle showing the same frame for minutes.
+
+`zoom` is a CSS zoom of the page body: `1.5` makes the viewport effectively
+1120x843 CSS pixels (1680/1.5 x 1264/1.5), so the dashboard reflows as on a
+smaller screen. Fewer cards fit per row, text and icons get larger. Design the
+dashboard for the zoomed size, or use a dedicated single-column view.
+
+`contrast` multiplies the gray values around mid-gray before quantising to
+`gray_levels`; values above 1 push light grays to white and dark grays to
+black. On the Oasis panel 1.15 lost card borders and light text, 0.95 kept
+them. The default stays at 1.15 because it also drives the ghosting advice
+below; set 0.95 if the picture looks harsh.
 
 ## Configuration reference
 
@@ -245,7 +310,8 @@ validator and an amd64 Docker build of the app; it can also be started by hand
 **Ghosting / grey residue.** Lower `FULL_REFRESH_EVERY` (every full refresh
 flashes black→white). Increase `contrast` in the app (1.3–1.6) or set
 `gray_levels: 2` for pure black and white. Keep dithering on for photos and
-graphs, off for text-only dashboards.
+graphs, off for text-only dashboards. Picture too harsh instead (thin borders
+and light text gone)? Lower `contrast` to about 0.95.
 
 **Image is rotated, cut off or blank.** See [Orientation](#orientation): the
 framebuffer is portrait, `fbink` does not rotate, so the PNG must be 1264 wide
@@ -253,6 +319,16 @@ x 1680 high (`rotation: 90` or `270` with a landscape viewport). *Show status /
 log* prints the frame and framebuffer sizes. Add `w=-2,h=-2` to
 `FBINK_IMG_OPTS` to scale to fit instead of cropping. A blank screen after
 *Fetch once* means the fetch failed; the log tail names the reason.
+
+**Image upside down, but only sometimes.** The Oasis framebuffer flips 180°
+with the accelerometer (`rota=0` vs `rota=2` in the log). Extension 0.2.2 with
+app 0.2.2 compensates on every fetch; make sure both are updated (`Tools:`
+line and `fb_rotate=` in the log, `version` in `/status`). If it is upside
+down *and* the log says `rota=0`, swap `rotation` 90 <-> 270 in the app.
+
+**Most renders time out, only every ~10th frame reaches the Kindle.** The host
+is too small for headless Chromium: 2 vCPU / 2 GB was not enough, 4 vCPU / 4 GB
+is, see [Tuning](#tuning-what-worked-on-the-oasis-2).
 
 **Kindle shows "offline since …".** The fetch failed. Check Wi-Fi (the daemon
 pings the server host and asks `wifid` to enable the radio), that the URL is
@@ -284,12 +360,14 @@ screenshot at `/last-error.png` shows what Chromium got.
 DOM and may lag behind a frontend release. Install the *kiosk-mode* HACS
 plugin and set `url_query: ?kiosk`.
 
-**Cards are tiny.** 300 ppi: set `zoom: 1.5` to `2.0`, or design a dedicated
-dashboard for the Kindle (one column, large fonts, light theme).
+**Cards are tiny.** 300 ppi: set `zoom: 1.5` (2.0 was too much on the Oasis),
+or design a dedicated dashboard for the Kindle (one column, large fonts, light
+theme). Zoom shrinks the CSS viewport and reflows the cards, see
+[Tuning](#tuning-what-worked-on-the-oasis-2).
 
 **Chromium fails to start in the app.** The app disables AppArmor and passes
-`--no-sandbox`; on a very small host raise the RAM. The watchdog restarts the
-app if `/health` stops answering.
+`--no-sandbox`; on a small host raise the RAM and CPU (4 vCPU / 4 GB worked,
+2 / 2 did not). The watchdog restarts the app if `/health` stops answering.
 
 ## Security
 

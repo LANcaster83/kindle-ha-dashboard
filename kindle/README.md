@@ -20,8 +20,22 @@ Orientation: on Kindle, `fbink -g` copies the PNG 1:1 into the framebuffer and
 never rotates it (`FBINK_NO_SW_ROTA` only exists for PocketBook/Kobo builds).
 The Oasis framebuffer is portrait, 1264x1680, whenever the Home screen or KUAL
 is in front, so the renderer app ships the landscape dashboard already rotated
-(`rotation: 90`). The daemon logs `Frame WxH, framebuffer WxH` after the first
-fetch and warns on screen when the image would be cropped.
+(`rotation: 90` or `270`). The Oasis framework also flips that framebuffer by
+180° from the accelerometer (`fbink -e` reports `currentRota=0` or `2`), so the
+daemon reads the rotation before every fetch, passes it as `?fb_rotate=N` and
+the app returns the frame counter-rotated; while waiting it re-checks every
+`ROTATION_POLL` seconds. KOReader does the same thing in its own way (it reads
+`com.lab126.winmgr accelerometer` and rotates in software). The daemon logs the
+orientation state at start, `Frame WxH, framebuffer WxH rota=N` after the first
+fetch, every drawn frame with its rotation, and warns on screen when the image
+would be cropped. `ORIENTATION_LOCK` in `config.sh` optionally sets
+`com.lab126.winmgr orientationLock` for the run (unverified on FW 5.16).
+
+Tests: `kindle/test/dry-run.sh` runs the daemon under `busybox sh` with fake
+`fbink`, `curl` and `lipc-*` tools (no device needed) and checks the
+`fb_rotate` it sends for `rota=0`, `2` and unknown, the mid-interval re-fetch
+when the rotation flips, the `STOP` file, SIGTERM and the orientation lock
+restore. CI runs it next to shellcheck.
 
 ## fbink
 

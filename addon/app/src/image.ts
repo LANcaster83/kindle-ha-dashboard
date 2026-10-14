@@ -1,6 +1,26 @@
 import { PNG } from "pngjs";
 import type { Rotation } from "./config.js";
 
+/** Linux fbdev `rotate` as the Kindle framebuffer reports it: 0 upright, 1 clockwise, 2 upside down, 3 counter-clockwise. */
+export type FbRotate = 0 | 1 | 2 | 3;
+
+/**
+ * Rotation that lands the dashboard upright when the kernel displays the framebuffer rotated by
+ * `fbRotate` (the Oasis framework flips it 0 <-> 2 from the accelerometer). The PNG is counter-rotated
+ * by the same amount: a 180 degree flip is unambiguous; the sign for 1/3 (landscape framebuffer, only
+ * seen inside the stock reader) follows fbdev's convention and has not been verified on a device.
+ */
+export function effectiveRotation(base: Rotation, fbRotate: FbRotate): Rotation {
+  return ((((base - fbRotate * 90) % 360) + 360) % 360) as Rotation;
+}
+
+/** Parses the `fb_rotate` query value: null when absent, undefined when not 0..3. */
+export function parseFbRotate(raw: string | null): FbRotate | null | undefined {
+  if (raw === null) return null;
+  if (!/^[0-3]$/.test(raw)) return undefined;
+  return Number(raw) as FbRotate;
+}
+
 export interface GrayImage {
   width: number;
   height: number;
@@ -139,12 +159,20 @@ export interface ProcessOptions {
   dither: boolean;
 }
 
+export interface ProcessedImage {
+  png: Buffer;
+  width: number;
+  height: number;
+  /** The processed image before `rotation`, so other rotations can be derived without re-rendering. */
+  image: GrayImage;
+}
+
 /** Full pipeline: RGBA screenshot PNG -> e-ink friendly 8-bit grayscale PNG. */
-export function processScreenshot(screenshotPng: Buffer, opts: ProcessOptions): { png: Buffer; width: number; height: number } {
+export function processScreenshot(screenshotPng: Buffer, opts: ProcessOptions): ProcessedImage {
   const decoded = decodePng(screenshotPng);
   let img = rgbaToGray(decoded.data, decoded.width, decoded.height);
   img = applyContrast(img, opts.contrast);
   img = quantise(img, opts.grayLevels, opts.dither);
-  img = rotate(img, opts.rotation);
-  return { png: encodeGrayPng(img), width: img.width, height: img.height };
+  const rotated = rotate(img, opts.rotation);
+  return { png: encodeGrayPng(rotated), width: rotated.width, height: rotated.height, image: img };
 }

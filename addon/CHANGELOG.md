@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.2
+
+- `GET /kindle.png?fb_rotate=N` (N = 0..3, the framebuffer rotation as Linux
+  fbdev / `fbink -e` report it) serves the latest frame counter-rotated so it
+  shows upright on that framebuffer: `fb_rotate=2` adds 180° to `rotation`.
+  Each rotation is encoded once per render and cached with its own `ETag`;
+  nothing is re-rendered. `rotation` stays the base orientation. The response
+  carries `X-Image-Rotation`; `/status` reports `rotation`. An invalid value
+  is a 400. The Kindle daemon 0.2.2 sends it on every fetch because the Oasis
+  framework flips the framebuffer 0 <-> 2 from the accelerometer.
+- Docs: minimum host size (4 vCPU / 4 GB for HAOS; 2/2 timed out on most
+  frames), what `zoom` does at 300 ppi, `contrast` on real e-ink, a working
+  Oasis 2 configuration.
+
 ## 0.2.1
 
 - `ha_url` accepts an empty value again: the configuration UI sends `""` for a

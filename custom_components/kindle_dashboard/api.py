@@ -69,9 +69,18 @@ class KindleDashApi:
                 raise KindleDashApiError(f"Render failed: {message}")
         return data if isinstance(data, dict) else {}
 
-    async def image(self, fresh: bool = False) -> tuple[bytes, dict[str, str]]:
-        """Return the latest PNG and selected response headers."""
-        path = "/kindle.png?render=1" if fresh else "/kindle.png"
+    async def image(self, fresh: bool = False, fb_rotate: int | None = None) -> tuple[bytes, dict[str, str]]:
+        """Return the latest PNG and selected response headers.
+
+        ``fb_rotate`` is the framebuffer rotation the Kindle reported (0-3); the
+        renderer counter-rotates the frame so it shows upright.
+        """
+        params: list[str] = []
+        if fresh:
+            params.append("render=1")
+        if fb_rotate is not None:
+            params.append(f"fb_rotate={fb_rotate}")
+        path = "/kindle.png" + (f"?{'&'.join(params)}" if params else "")
         resp = await self._request("GET", path, timeout_s=120)
         async with resp:
             if resp.status != 200:
@@ -79,7 +88,14 @@ class KindleDashApi:
             body = await resp.read()
             headers = {
                 key: resp.headers[key]
-                for key in ("ETag", "Last-Modified", "X-Render-Time", "X-Image-Size", "X-Render-Error")
+                for key in (
+                    "ETag",
+                    "Last-Modified",
+                    "X-Render-Time",
+                    "X-Image-Size",
+                    "X-Image-Rotation",
+                    "X-Render-Error",
+                )
                 if key in resp.headers
             }
         return body, headers

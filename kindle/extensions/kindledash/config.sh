@@ -45,8 +45,22 @@ FBINK_IMG_OPTS="halign=CENTER,valign=CENTER"
 # Orientation: fbink draws the PNG 1:1 into the framebuffer and never rotates it
 # on Kindle. The Oasis framebuffer is portrait (1264x1680) while the Home screen
 # or KUAL is in front, so a landscape dashboard must arrive already rotated:
-# keep width 1680 x height 1264 and rotation 90 (or 270 to flip it) in the app.
-# The daemon logs "frame WxH / framebuffer WxH" and warns when they do not match.
+# keep width 1680 x height 1264 and rotation 90 or 270 in the app (whichever puts
+# the page buttons where you want them while the framebuffer reports rota=0).
+# The Oasis framework also flips the framebuffer by 180 degrees (rota 0 <-> 2)
+# from the accelerometer, which turned a fixed PNG upside down between runs. The
+# daemon now reads the rotation with "fbink -e" before every fetch and asks the
+# server for a counter-rotated frame (?fb_rotate=N), so the picture stays put.
+# The log shows "fb rota=N" on every frame and every change.
+#
+# Seconds between rotation checks while waiting for the next frame; a change
+# fetches a new frame at once instead of after INTERVAL. 0 = only check per frame.
+ROTATION_POLL=5
+# Optional: ask the window manager to stop following the accelerometer while the
+# dashboard runs (lipc-set-prop com.lab126.winmgr orientationLock U|D|L|R), restored
+# on stop. Not needed for a correct picture (see above) and unverified on FW 5.16:
+# leave empty unless the flip itself bothers you. The log says whether it took.
+ORIENTATION_LOCK=""
 
 # --- UI mode ------------------------------------------------------------------
 # Default mode when started without an argument:
@@ -59,5 +73,6 @@ FBINK_IMG_OPTS="halign=CENTER,valign=CENTER"
 # (The former "freeze" mode froze the Kindle on FW 5.16 and was removed.)
 UI_MODE="keep"
 
-# Host to ping while waiting for Wi-Fi. Empty = host part of IMAGE_URL.
+# Host to ping while waiting for Wi-Fi. Empty = host part of IMAGE_URL, "none" = do not
+# wait (set it when the server drops ICMP; otherwise every frame waits up to 60 s).
 WIFI_TEST_HOST=""

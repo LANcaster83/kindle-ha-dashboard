@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { loadConfig, redactConfig, type Config } from "./config.js";
+import { loadConfig, redactConfig, type Config, type Rotation } from "./config.js";
 import { resolveHaUrl } from "./haurl.js";
+import { effectiveRotation, encodeGrayPng, parseFbRotate, rotate, type FbRotate } from "./image.js";
 import { log, setLogLevel } from "./log.js";
 import { createRenderer, type Renderer, type RenderResult } from "./renderer.js";
 
@@ -20,18 +21,35 @@ export interface Status {
   image_width: number | null;
   image_height: number | null;
   image_bytes: number | null;
+  /** The configured base rotation; `/kindle.png?fb_rotate=` serves other rotations of the same frame. */
+  rotation: Rotation;
   interval_seconds: number;
   next_render: string | null;
   uptime_seconds: number;
   version: string;
 }
 
-export const VERSION = "0.2.1";
+export const VERSION = "0.2.2";
+
+/** One encoding of the latest frame at a given rotation. */
+export interface ImageVariant {
+  png: Buffer;
+  width: number;
+  height: number;
+  rotation: Rotation;
+  etag: string;
+}
+
+function etagOf(png: Buffer): string {
+  return `"${createHash("sha1").update(png).digest("hex")}"`;
+}
 
 /** Mutable state shared between the scheduler and the HTTP handlers. */
 export class RenderState {
   last: RenderResult | null = null;
   etag: string | null = null;
+  /** Encodings of `last` at rotations other than the configured one, derived on demand. */
+  private variants = new Map<Rotation, ImageVariant>();
   lastError: string | null = null;
   lastErrorAt: Date | null = null;
   renderCount = 0;
@@ -53,7 +71,8 @@ export class RenderState {
       .render()
       .then((res) => {
         this.last = res;
-        this.etag = `"${createHash("sha1").update(res.png).digest("hex")}"`;
+        this.etag = etagOf(res.png);
+        this.variants.clear();
         this.renderCount += 1;
         this.consecutiveErrors = 0;
         this.lastError = null;
@@ -74,6 +93,29 @@ export class RenderState {
     return this.rendering;
   }
 
+  /**
+   * The latest frame rotated so that it shows upright on a framebuffer the kernel displays rotated by
+   * `fbRotate` (what the Kindle reports as `currentRota`). The configured rotation is served as rendered;
+   * other rotations are encoded once per render and cached until the next one.
+   */
+  variant(fbRotate: FbRotate): ImageVariant | null {
+    const last = this.last;
+    if (!last || !this.etag) return null;
+    const rotation = effectiveRotation(this.cfg.rotation, fbRotate);
+    if (rotation === this.cfg.rotation) {
+      return { png: last.png, width: last.width, height: last.height, rotation, etag: this.etag };
+    }
+    let variant = this.variants.get(rotation);
+    if (!variant) {
+      const img = rotate(last.image, rotation);
+      const png = encodeGrayPng(img);
+      variant = { png, width: img.width, height: img.height, rotation, etag: etagOf(png) };
+      this.variants.set(rotation, variant);
+      log.info(`Encoded the frame at rotation ${rotation} (fb_rotate=${fbRotate}, base ${this.cfg.rotation}): ${img.width}x${img.height}`);
+    }
+    return variant;
+  }
+
   status(): Status {
     return {
       ok: this.last !== null && this.lastError === null,
@@ -88,6 +130,7 @@ export class RenderState {
       image_width: this.last?.width ?? null,
       image_height: this.last?.height ?? null,
       image_bytes: this.last?.png.length ?? null,
+      rotation: this.cfg.rotation,
       interval_seconds: this.cfg.intervalSeconds,
       next_render: this.nextRenderAt?.toISOString() ?? null,
       uptime_seconds: Math.round((Date.now() - this.startedAt) / 1000),
@@ -200,6 +243,11 @@ export function createApp(state: RenderState, cfg: Config) {
     }
 
     if (path === "/kindle.png" && (method === "GET" || method === "HEAD")) {
+      const fbRotate = parseFbRotate(url.searchParams.get("fb_rotate"));
+      if (fbRotate === undefined) {
+        sendJson(res, 400, { error: "fb_rotate must be 0, 1, 2 or 3 (the framebuffer rotation, fbink's currentRota)" });
+        return;
+      }
       const fresh = url.searchParams.get("render") === "1";
       if (fresh || !state.last) {
         try {
@@ -213,13 +261,14 @@ export function createApp(state: RenderState, cfg: Config) {
           res.setHeader("X-Render-Error", "1");
         }
       }
-      const img = state.last;
-      if (!img || !state.etag) {
+      const img = state.variant(fbRotate ?? 0);
+      const renderedAt = state.last?.renderedAt;
+      if (!img || !renderedAt) {
         sendJson(res, 503, { error: "no image rendered yet" });
         return;
       }
-      if (req.headers["if-none-match"] === state.etag) {
-        res.writeHead(304, { ETag: state.etag });
+      if (req.headers["if-none-match"] === img.etag) {
+        res.writeHead(304, { ETag: img.etag });
         res.end();
         return;
       }
@@ -227,10 +276,11 @@ export function createApp(state: RenderState, cfg: Config) {
         "Content-Type": "image/png",
         "Content-Length": img.png.length,
         "Cache-Control": "no-cache",
-        ETag: state.etag,
-        "Last-Modified": img.renderedAt.toUTCString(),
-        "X-Render-Time": img.renderedAt.toISOString(),
+        ETag: img.etag,
+        "Last-Modified": renderedAt.toUTCString(),
+        "X-Render-Time": renderedAt.toISOString(),
         "X-Image-Size": `${img.width}x${img.height}`,
+        "X-Image-Rotation": String(img.rotation),
       });
       res.end(method === "HEAD" ? undefined : img.png);
       return;

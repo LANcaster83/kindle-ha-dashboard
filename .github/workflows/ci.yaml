@@ -78,9 +78,11 @@ jobs:
           ignore: ${{ github.event_name == 'pull_request' && 'brands license' || 'brands' }}
 
   shellcheck:
-    name: Kindle scripts (shellcheck)
+    name: Kindle scripts (shellcheck, busybox dry run)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck
-      - run: shellcheck -s sh kindle/extensions/kindledash/bin/*.sh kindle/extensions/kindledash/config.sh
+      - run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck busybox
+      - run: shellcheck -s sh kindle/extensions/kindledash/bin/*.sh kindle/extensions/kindledash/config.sh kindle/test/dry-run.sh
+      # Runs the daemon under busybox sh with fake fbink/curl/lipc: rotation handling, STOP file, orientation lock.
+      - run: kindle/test/dry-run.sh

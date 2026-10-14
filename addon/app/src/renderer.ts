@@ -3,12 +3,15 @@ import { dirname } from "node:path";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import type { Config } from "./config.js";
 import { log } from "./log.js";
-import { processScreenshot } from "./image.js";
+import { processScreenshot, type GrayImage } from "./image.js";
 
 export interface RenderResult {
+  /** The frame rotated by the configured `rotation`. */
   png: Buffer;
   width: number;
   height: number;
+  /** The processed frame before rotation; `/kindle.png?fb_rotate=` derives other rotations from it. */
+  image: GrayImage;
   renderedAt: Date;
   durationMs: number;
 }
@@ -430,6 +433,7 @@ export function createRenderer(cfg: Config, deps: RendererDeps = {}): Renderer {
         png: processed.png,
         width: processed.width,
         height: processed.height,
+        image: processed.image,
         renderedAt: new Date(),
         durationMs: Date.now() - started,
       };

@@ -41,6 +41,8 @@ FBINK_BIN=""
 FBINK_IMG_OPTS="halign=CENTER,valign=CENTER"
 UI_MODE="keep"
 WIFI_TEST_HOST=""
+ORIENTATION_LOCK=""
+ROTATION_POLL=5
 
 if [ -f "${EXT_DIR}/config.sh" ]; then
     # shellcheck disable=SC1091
@@ -201,15 +203,42 @@ png_format() {
     printf '%d/%d' "0x$(echo "${hex}" | cut -c1-2)" "0x$(echo "${hex}" | cut -c3-4)"
 }
 
+fb_state() {
+    # Prints fbink -e output one "key=value" per line (empty without fbink).
+    [ -n "${FBINK}" ] || return 1
+    "${FBINK}" -e 2>/dev/null | tr ';' '\n'
+}
+
 fb_geometry() {
     # Prints "WxH rota=N" of the framebuffer as fbink sees it (fbink draws 1:1, no rotation on Kindle).
-    [ -n "${FBINK}" ] || return 1
-    state="$("${FBINK}" -e 2>/dev/null | tr ';' '\n')"
+    state="$(fb_state)" || return 1
     w="$(echo "${state}" | sed -n 's/^viewWidth=//p')"
     h="$(echo "${state}" | sed -n 's/^viewHeight=//p')"
     r="$(echo "${state}" | sed -n 's/^currentRota=//p')"
     [ -n "${w}" ] && [ -n "${h}" ] || return 1
     printf '%sx%s rota=%s' "${w}" "${h}" "${r:-?}"
+}
+
+fb_rota() {
+    # Prints the framebuffer rotation (Linux fbdev "rotate": 0 upright, 1 CW, 2 upside down, 3 CCW)
+    # as fbink reports it (currentRota), or nothing when unknown. On the Oasis the framework
+    # flips it between 0 and 2 from the accelerometer, which turns a fixed PNG upside down.
+    r="$(fb_state 2>/dev/null | sed -n 's/^currentRota=\([0-3]\)$/\1/p')"
+    [ -n "${r}" ] && echo "${r}"
+}
+
+image_url() {
+    # $1 = framebuffer rotation (may be empty). The app counter-rotates the frame for fb_rotate.
+    case "$1" in
+        [0-3]) echo "${IMAGE_URL}?token=${TOKEN}&fb_rotate=$1" ;;
+        *) echo "${IMAGE_URL}?token=${TOKEN}" ;;
+    esac
+}
+
+winmgr_get() {
+    # Prints a com.lab126.winmgr property or "?" (no lipc, property unknown).
+    v="$(lipc-get-prop com.lab126.winmgr "$1" 2>/dev/null)"
+    echo "${v:-?}"
 }
 
 check_geometry() {
@@ -264,8 +293,9 @@ firmware_version() {
 }
 
 wait_for_wifi() {
+    # WIFI_TEST_HOST=none skips the check (host drops ICMP, or tests).
     host="${WIFI_TEST_HOST:-$(url_host "${IMAGE_URL}")}"
-    [ -n "${host}" ] || return 0
+    [ -n "${host}" ] && [ "${host}" != "none" ] || return 0
     tries=0
     while ! ping -c 1 -W 2 "${host}" >/dev/null 2>&1; do
         tries=$((tries + 1))
@@ -287,10 +317,23 @@ wait_for_wifi() {
 # ---------------------------------------------------------------------------
 UI_APPLIED=""
 
+ORIENTATION_LOCK_PREV=""
+
 ui_enter() {
     # Keep the device awake and Wi-Fi on while we run.
     lipc_set com.lab126.powerd preventScreenSaver 1
     lipc_set com.lab126.cmd wirelessEnable 1
+    if [ -n "${ORIENTATION_LOCK}" ]; then
+        # Ask the window manager to stop following the accelerometer. The frame is counter-rotated
+        # from what fbink reports anyway, so this only avoids the flip itself, not a wrong picture.
+        ORIENTATION_LOCK_PREV="$(winmgr_get orientationLock)"
+        if lipc_set com.lab126.winmgr orientationLock "${ORIENTATION_LOCK}"; then
+            log "Orientation lock set: orientationLock=${ORIENTATION_LOCK} (was ${ORIENTATION_LOCK_PREV}), now orientation=$(winmgr_get orientation) fb rota=$(fb_rota || echo '?')"
+        else
+            log "Orientation lock refused; relying on fb_rotate compensation only"
+            ORIENTATION_LOCK_PREV=""
+        fi
+    fi
     case "${UI_MODE}" in
         freeze)
             # KOReader's SIGSTOP-the-window-manager recipe only works for a foreground app that
@@ -324,6 +367,10 @@ ui_enter() {
 
 ui_leave() {
     lipc_set com.lab126.powerd preventScreenSaver 0
+    if [ -n "${ORIENTATION_LOCK_PREV}" ] && [ "${ORIENTATION_LOCK_PREV}" != "?" ]; then
+        lipc_set com.lab126.winmgr orientationLock "${ORIENTATION_LOCK_PREV}" && log "Orientation lock restored: orientationLock=${ORIENTATION_LOCK_PREV}"
+        ORIENTATION_LOCK_PREV=""
+    fi
     case "${UI_APPLIED}" in
         stop_framework)
             if [ -d /etc/upstart ]; then
@@ -349,6 +396,32 @@ cleanup() {
 log_environment() {
     log "Tools: http=${HTTP_CLIENT:-none} fbink=${FBINK_SRC:-none} eips=${EIPS:-none} lipc=$(command -v lipc-get-prop || echo none) fw=$(firmware_version)"
     battery_level log >/dev/null
+    log "Orientation: fb rota=$(fb_rota || echo '?') winmgr orientation=$(winmgr_get orientation) accelerometer=$(winmgr_get accelerometer) orientationLock=$(winmgr_get orientationLock) (ORIENTATION_LOCK='${ORIENTATION_LOCK}', ROTATION_POLL=${ROTATION_POLL}s)"
+}
+
+wait_interval() {
+    # Sleeps INTERVAL seconds in ROTATION_POLL steps. Returns 1 early when the framebuffer
+    # rotation moved away from $1 (the Oasis was turned over) or the STOP file appeared, so the
+    # loop fetches a frame for the new rotation at once instead of showing it upside down for a minute.
+    slept=0
+    while [ "${slept}" -lt "${INTERVAL}" ]; do
+        step=$((INTERVAL - slept))
+        if [ "${ROTATION_POLL}" -gt 0 ] && [ "${step}" -gt "${ROTATION_POLL}" ]; then
+            step="${ROTATION_POLL}"
+        fi
+        sleep "${step}" &
+        wait $!
+        slept=$((slept + step))
+        [ -f "${STOP_FILE}" ] && return 1
+        if [ "${ROTATION_POLL}" -gt 0 ] && [ -n "$1" ]; then
+            now_rota="$(fb_rota)"
+            if [ -n "${now_rota}" ] && [ "${now_rota}" != "$1" ]; then
+                log "Framebuffer rotation changed: rota $1 -> ${now_rota}, fetching a counter-rotated frame now"
+                return 1
+            fi
+        fi
+    done
+    return 0
 }
 
 if [ "${ONCE}" = "1" ]; then
@@ -360,10 +433,12 @@ if [ "${ONCE}" = "1" ]; then
         say "kindledash: no curl/wget found"
         exit 1
     fi
-    if http_get "${IMAGE_URL}?token=${TOKEN}" "${RUN_DIR}/once.png" && is_png "${RUN_DIR}/once.png"; then
+    rota="$(fb_rota)"
+    log "Fetch once: fb rota=${rota:-unknown}, requesting fb_rotate=${rota:-none}"
+    if http_get "$(image_url "${rota}")" "${RUN_DIR}/once.png" && is_png "${RUN_DIR}/once.png"; then
         check_geometry "${RUN_DIR}/once.png"
         if draw_image "${RUN_DIR}/once.png" 1; then
-            log "Fetch once OK"
+            log "Fetch once OK (fb rota=${rota:-unknown})"
         else
             log "Fetch once: fetched but could not draw, see the lines above"
             say "kindledash: fetched, draw failed (see log)"
@@ -411,6 +486,8 @@ failures=0
 checked=0
 started_at="$(date +%s)"
 last_report=0
+drawn=0
+rota=""
 
 while :; do
     now="$(date +%s)"
@@ -424,7 +501,13 @@ while :; do
     fi
 
     wait_for_wifi
-    if http_get "${IMAGE_URL}?token=${TOKEN}" "${TMP_PNG}" && is_png "${TMP_PNG}"; then
+    prev_rota="${rota}"
+    rota="$(fb_rota)"
+    if [ "${rota}" != "${prev_rota}" ]; then
+        log "Framebuffer rota=${rota:-unknown} (was ${prev_rota:-unknown}): requesting fb_rotate=${rota:-none}, full refresh"
+        frame="${FULL_REFRESH_EVERY}"
+    fi
+    if http_get "$(image_url "${rota}")" "${TMP_PNG}" && is_png "${TMP_PNG}"; then
         mv -f "${TMP_PNG}" "${CUR_PNG}"
         full=0
         if [ "${failures}" -gt 0 ] || [ "${frame}" -ge "${FULL_REFRESH_EVERY}" ]; then
@@ -436,7 +519,10 @@ while :; do
             check_geometry "${CUR_PNG}"
             checked=1
         fi
-        if ! draw_image "${CUR_PNG}" "${full}"; then
+        if draw_image "${CUR_PNG}" "${full}"; then
+            drawn=$((drawn + 1))
+            log "Drew frame ${drawn} (fb rota=${rota:-unknown}, fb_rotate=${rota:-none}, full=${full})"
+        else
             say " kindledash: draw failed, see log "
         fi
         frame=$((frame + 1))
@@ -454,7 +540,7 @@ while :; do
         say " battery ${bat}% "
     fi
     if [ "${BATTERY_REPORT_EVERY}" -gt 0 ] && [ -n "${STATUS_URL}" ] && [ $((now - last_report)) -ge "${BATTERY_REPORT_EVERY}" ]; then
-        json="{\"battery\":${bat:-0},\"charging\":$(is_charging),\"uptime\":$((now - started_at)),\"firmware\":\"$(firmware_version)\",\"failures\":${failures},\"mode\":\"${UI_MODE}\"}"
+        json="{\"battery\":${bat:-0},\"charging\":$(is_charging),\"uptime\":$((now - started_at)),\"firmware\":\"$(firmware_version)\",\"failures\":${failures},\"mode\":\"${UI_MODE}\",\"fb_rotate\":${rota:-null}}"
         if http_post_json "${STATUS_URL}?token=${TOKEN}" "${json}"; then
             last_report="${now}"
         else
@@ -465,7 +551,6 @@ while :; do
     fi
 
     rotate_log
-    sleep "${INTERVAL}" &
-    wait $!
+    wait_interval "${rota}" || true
 done
 cleanup
