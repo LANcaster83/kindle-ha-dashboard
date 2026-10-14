@@ -84,5 +84,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update -q && sudo apt-get install -y -q shellcheck busybox
       - run: shellcheck -s sh kindle/extensions/kindledash/bin/*.sh kindle/extensions/kindledash/config.sh kindle/test/dry-run.sh
-      # Runs the daemon under busybox sh with fake fbink/curl/lipc: rotation handling, STOP file, orientation lock.
+      # Runs the daemon under busybox sh with fake fbink/curl/lipc and a fake /dev/input stream:
+      # rotation handling, STOP file, orientation lock, page buttons (front light, held exit).
       - run: kindle/test/dry-run.sh
