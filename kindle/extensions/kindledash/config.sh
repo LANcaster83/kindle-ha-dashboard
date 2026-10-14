@@ -76,3 +76,29 @@ UI_MODE="keep"
 # Host to ping while waiting for Wi-Fi. Empty = host part of IMAGE_URL, "none" = do not
 # wait (set it when the server drops ICMP; otherwise every frame waits up to 60 s).
 WIFI_TEST_HOST=""
+
+# --- Hardware buttons (Oasis page buttons) --------------------------------------
+# The daemon reads the two page buttons from /dev/input/eventN and uses them for the
+# front light; both held together stop the dashboard. 1 = on, 0 = off.
+BUTTONS=1
+# Key codes (Linux input, KOReader's device.lua for the Oasis 2): 104 is the upper and
+# 109 the lower button in portrait. With the buttons at the bottom (rotation 270) the
+# upper one is on the right. Swap the two numbers to swap the buttons.
+BUTTON_LIGHT_UP=104      # raises the front light
+BUTTON_LIGHT_DOWN=109    # lowers the front light
+# Front light step per press and its range (com.lab126.powerd flIntensity, 0-24 on the Oasis).
+BUTTON_LIGHT_STEP=2
+LIGHT_MIN=0
+LIGHT_MAX=24
+# Both buttons held this many whole seconds: stop the daemon, restore the UI and open
+# the Home screen (same as "Stop dashboard", also works in stop_framework mode).
+BUTTON_HOLD_SECONDS=1
+# Seconds the "Light N/24" message stays before the frame is redrawn over it.
+BUTTON_MESSAGE_SECONDS=1
+# Input device override, e.g. "/dev/input/event1". Empty = auto-detect: the device whose
+# sysfs key bitmap lists both key codes, else one named like gpio-keys. The log says
+# which one was chosen and lists every input device by name ("Buttons: ..." lines).
+BUTTON_DEVICE=""
+# Note: busybox sh cannot grab the device exclusively, so in keep mode the Kindle UI
+# sees the presses too (the Home screen pages underneath; the frame is redrawn after
+# BUTTON_MESSAGE_SECONDS). In stop_framework mode the buttons belong to the daemon.

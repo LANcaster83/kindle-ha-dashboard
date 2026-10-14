@@ -43,6 +43,19 @@ UI_MODE="keep"
 WIFI_TEST_HOST=""
 ORIENTATION_LOCK=""
 ROTATION_POLL=5
+# Hardware buttons (Oasis page buttons): see config.sh.
+BUTTONS=1
+BUTTON_DEVICE=""
+BUTTON_LIGHT_UP=104
+BUTTON_LIGHT_DOWN=109
+BUTTON_LIGHT_STEP=2
+BUTTON_HOLD_SECONDS=1
+BUTTON_MESSAGE_SECONDS=1
+LIGHT_MIN=0
+LIGHT_MAX=24
+# Where input devices are looked up (overridden by the dry run).
+INPUT_SYS="${KINDLEDASH_INPUT_SYS:-/sys/class/input}"
+INPUT_DEV="${KINDLEDASH_INPUT_DEV:-/dev/input}"
 
 if [ -f "${EXT_DIR}/config.sh" ]; then
     # shellcheck disable=SC1091
@@ -72,13 +85,14 @@ rotate_log() {
 
 # Run a command, keep its stderr, log it with the exit code when it fails.
 # $1 = label for the log, rest = command. Returns the command's exit code.
+STDERR_FILE="${RUN_DIR}/stderr"
 run_logged() {
     label="$1"
     shift
-    "$@" >/dev/null 2>"${RUN_DIR}/stderr"
+    "$@" >/dev/null 2>"${STDERR_FILE}"
     rc=$?
     if [ "${rc}" -ne 0 ]; then
-        log "${label} failed rc=${rc}: $(tr '\n' ' ' <"${RUN_DIR}/stderr" | cut -c1-300)"
+        log "${label} failed rc=${rc}: $(tr '\n' ' ' <"${STDERR_FILE}" | cut -c1-300)"
     fi
     return "${rc}"
 }
@@ -384,11 +398,251 @@ ui_leave() {
 }
 
 # ---------------------------------------------------------------------------
+# Hardware buttons: front light up/down, both held = stop and go Home
+# ---------------------------------------------------------------------------
+# The Oasis page buttons are plain Linux input keys (gpio-keys): code 104 for the
+# upper, 109 for the lower button in portrait (KOReader's device.lua, KindleOasis2).
+# A listener subshell reads one 16-byte input_event at a time with dd (blocking
+# read, nothing buffered), decodes it with od and acts on EV_KEY releases.
+# busybox sh cannot ioctl(EVIOCGRAB), so in keep mode the Kindle UI sees the same
+# presses (it pages the Home screen under the dashboard; the frame is redrawn
+# BUTTON_MESSAGE_SECONDS later). In stop_framework mode the buttons are ours alone.
+
+caps_has_key() {
+    # $1 = sysfs capabilities/key (hex words, most significant first, 32-bit words
+    # on the Kindle's ARM kernel), $2 = key code. True when the bit is set.
+    word=$(($2 / 32))
+    bit=$(($2 % 32))
+    # shellcheck disable=SC2086
+    set -- $1
+    [ $# -gt "${word}" ] || return 1
+    skip=$(($# - word - 1))
+    while [ "${skip}" -gt 0 ]; do
+        shift
+        skip=$((skip - 1))
+    done
+    [ $(((0x$1 >> bit) & 1)) -eq 1 ]
+}
+
+find_button_device() {
+    # Prints the /dev/input/eventN to read. BUTTON_DEVICE from config.sh wins; else the
+    # first device whose sysfs key bitmap has both mapped codes; else the first one whose
+    # name looks like a key/button driver. Logs the choice and every candidate's name.
+    if [ -n "${BUTTON_DEVICE}" ]; then
+        log "Buttons: using BUTTON_DEVICE=${BUTTON_DEVICE} from config.sh"
+        echo "${BUTTON_DEVICE}"
+        return 0
+    fi
+    seen=""
+    by_name=""
+    for sys in "${INPUT_SYS}"/event*; do
+        [ -e "${sys}" ] || continue
+        ev="${sys##*/}"
+        name="$(cat "${sys}/device/name" 2>/dev/null)"
+        caps="$(cat "${sys}/device/capabilities/key" 2>/dev/null)"
+        seen="${seen} ${ev}=\"${name:-?}\""
+        if caps_has_key "${caps}" "${BUTTON_LIGHT_UP}" && caps_has_key "${caps}" "${BUTTON_LIGHT_DOWN}"; then
+            log "Buttons: ${INPUT_DEV}/${ev} (\"${name}\") reports keys ${BUTTON_LIGHT_UP} and ${BUTTON_LIGHT_DOWN}; input devices:${seen}"
+            echo "${INPUT_DEV}/${ev}"
+            return 0
+        fi
+        case "${name}" in
+            *gpio*key* | *button* | *keypad* | mxckpd*) [ -n "${by_name}" ] || by_name="${ev}" ;;
+        esac
+    done
+    if [ -n "${by_name}" ]; then
+        log "Buttons: no device lists keys ${BUTTON_LIGHT_UP}/${BUTTON_LIGHT_DOWN} in sysfs, trying ${INPUT_DEV}/${by_name} by name; input devices:${seen}"
+        echo "${INPUT_DEV}/${by_name}"
+        return 0
+    fi
+    log "Buttons: no input device found for keys ${BUTTON_LIGHT_UP}/${BUTTON_LIGHT_DOWN} (input devices:${seen:- none}); set BUTTON_DEVICE in config.sh"
+    return 1
+}
+
+front_light_step() {
+    # $1 = up|down. Moves powerd's flIntensity by BUTTON_LIGHT_STEP within LIGHT_MIN..LIGHT_MAX,
+    # prints "Light N/MAX" at the bottom and redraws the frame BUTTON_MESSAGE_SECONDS later.
+    cur="$(lipc-get-prop com.lab126.powerd flIntensity 2>/dev/null)"
+    if ! [ "${cur:-x}" -ge 0 ] 2>/dev/null; then
+        log "Buttons: cannot read com.lab126.powerd flIntensity (lipc), key $1 ignored"
+        say " light: powerd not reachable "
+        schedule_redraw
+        return 1
+    fi
+    if [ "$1" = "up" ]; then
+        new=$((cur + BUTTON_LIGHT_STEP))
+    else
+        new=$((cur - BUTTON_LIGHT_STEP))
+    fi
+    [ "${new}" -gt "${LIGHT_MAX}" ] && new="${LIGHT_MAX}"
+    [ "${new}" -lt "${LIGHT_MIN}" ] && new="${LIGHT_MIN}"
+    note=""
+    [ "${new}" -eq "${LIGHT_MAX}" ] && note=" (max)"
+    [ "${new}" -eq "${LIGHT_MIN}" ] && note=" (min)"
+    if [ "${new}" -ne "${cur}" ]; then
+        lipc_set com.lab126.powerd flIntensity "${new}" && log "Light ${cur} -> ${new}/${LIGHT_MAX} (key $1)"
+    else
+        log "Light stays ${cur}/${LIGHT_MAX} (key $1, at the limit)"
+    fi
+    say " Light ${new}/${LIGHT_MAX}${note} "
+    schedule_redraw
+}
+
+schedule_redraw() {
+    # Redraw the current frame (partial refresh) after the message had its moment; a new
+    # press restarts the timer so quick repeats do not flicker.
+    kill "${redraw_pid}" 2>/dev/null
+    (
+        sleep "${BUTTON_MESSAGE_SECONDS}"
+        [ -f "${CUR_PNG}" ] && draw_image "${CUR_PNG}" 0
+    ) &
+    redraw_pid=$!
+    echo "${redraw_pid}" >"${RUN_DIR}/buttons.redraw"
+}
+
+button_listener() {
+    # Runs in the background. $1 = input device. Single presses act on release; while both
+    # buttons are down a timer fires after BUTTON_HOLD_SECONDS and stops the daemon ($$ is
+    # still the daemon's pid in this subshell), releasing either button first cancels it.
+    dev="$1"
+    ev="${RUN_DIR}/buttons.event"
+    STDERR_FILE="${RUN_DIR}/stderr.buttons"
+    DRAWS_OK=1 # the main loop reports the first draw, not our redraws
+    dd_pid=""
+    timer_pid=""
+    redraw_pid=""
+    up_pressed=0
+    down_pressed=0
+    combo=0
+    trap 'kill "${dd_pid}" "${timer_pid}" "${redraw_pid}" 2>/dev/null; exit 0' INT TERM
+    while :; do
+        rm -f "${ev}"
+        dd if="${dev}" of="${ev}" bs=16 count=1 2>/dev/null &
+        dd_pid=$!
+        echo "${dd_pid}" >"${RUN_DIR}/buttons.dd"
+        wait "${dd_pid}"
+        rc=$?
+        if [ ! -s "${ev}" ]; then
+            log "Buttons: ${dev} closed or unreadable (dd rc=${rc}), listener stopped"
+            break
+        fi
+        # struct input_event on 32-bit ARM: tv_sec u32, tv_usec u32, type u16, code u16, value s32 (little endian).
+        # shellcheck disable=SC2046
+        set -- $(od -An -tx1 "${ev}" 2>/dev/null)
+        [ $# -ge 14 ] || continue
+        type=$((0x$9 | (0x${10} << 8)))
+        code=$((0x${11} | (0x${12} << 8)))
+        value=$((0x${13} | (0x${14} << 8)))
+        [ "${type}" -eq 1 ] || continue
+        case "${code}" in
+            "${BUTTON_LIGHT_UP}") key="up" ;;
+            "${BUTTON_LIGHT_DOWN}") key="down" ;;
+            *)
+                [ "${value}" -eq 1 ] && log "Buttons: key ${code} pressed (not mapped)"
+                continue
+                ;;
+        esac
+        case "${value}" in
+            1)
+                log "Buttons: key ${code} (${key}) pressed"
+                eval "${key}_pressed=1"
+                if [ "${up_pressed}" -eq 1 ] && [ "${down_pressed}" -eq 1 ]; then
+                    combo=1
+                    kill "${timer_pid}" 2>/dev/null
+                    (
+                        sleep "${BUTTON_HOLD_SECONDS}"
+                        log "Buttons: both held ${BUTTON_HOLD_SECONDS}s: stopping the dashboard, back to Home"
+                        : >"${RUN_DIR}/buttons.exit"
+                        kill -TERM $$
+                    ) &
+                    timer_pid=$!
+                    echo "${timer_pid}" >"${RUN_DIR}/buttons.timer"
+                fi
+                ;;
+            0)
+                log "Buttons: key ${code} (${key}) released"
+                eval "${key}_pressed=0"
+                if [ -n "${timer_pid}" ]; then
+                    kill "${timer_pid}" 2>/dev/null && log "Buttons: released before ${BUTTON_HOLD_SECONDS}s, exit cancelled"
+                    timer_pid=""
+                fi
+                if [ "${combo}" -eq 1 ]; then
+                    [ "${up_pressed}" -eq 0 ] && [ "${down_pressed}" -eq 0 ] && combo=0
+                else
+                    front_light_step "${key}"
+                fi
+                ;;
+        esac
+    done
+}
+
+BUTTONS_PID=""
+buttons_start() {
+    if [ "${BUTTONS}" != "1" ]; then
+        log "Buttons: disabled (BUTTONS=${BUTTONS})"
+        return 0
+    fi
+    dev="$(find_button_device)" || return 0
+    if [ ! -r "${dev}" ]; then
+        log "Buttons: ${dev} does not exist or is not readable, listener not started"
+        return 0
+    fi
+    button_listener "${dev}" &
+    BUTTONS_PID=$!
+    log "Buttons: listening on ${dev} (pid ${BUTTONS_PID}): key ${BUTTON_LIGHT_UP} = light +${BUTTON_LIGHT_STEP}, key ${BUTTON_LIGHT_DOWN} = light -${BUTTON_LIGHT_STEP} (${LIGHT_MIN}-${LIGHT_MAX}), both held ${BUTTON_HOLD_SECONDS}s = stop; mode ${UI_MODE}"
+}
+
+kill_recorded() {
+    # $1 = buttons.* file with a pid written by the listener. Only kills our own kind of
+    # process (dd reader, sleep timer, a subshell of this script) in case the pid was reused.
+    p="$(cat "${RUN_DIR}/$1" 2>/dev/null)"
+    rm -f "${RUN_DIR}/$1"
+    [ -n "${p}" ] || return 0
+    # The group redirect also silences the shell when /proc/<pid> is already gone.
+    cmd="$({ tr '\0' ' ' <"/proc/${p}/cmdline"; } 2>/dev/null)"
+    case "${cmd}" in
+        "" | dd\ * | sleep\ * | *kindledash*) kill "${p}" 2>/dev/null ;;
+    esac
+}
+
+buttons_stop() {
+    [ -n "${BUTTONS_PID}" ] || return 0
+    kill "${BUTTONS_PID}" 2>/dev/null
+    kill_recorded buttons.dd
+    kill_recorded buttons.timer
+    kill_recorded buttons.redraw
+    wait "${BUTTONS_PID}" 2>/dev/null
+    BUTTONS_PID=""
+    log "Buttons: listener stopped"
+}
+
+go_home() {
+    # Open the Home booklet (what KOReader does on exit). After a stop_framework run the
+    # GUI is still coming up, so retry for a while.
+    tries=0
+    while [ "${tries}" -lt 15 ]; do
+        if lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home >/dev/null 2>&1; then
+            log "Returned to the Home screen (try $((tries + 1)))"
+            return 0
+        fi
+        tries=$((tries + 1))
+        sleep 2
+    done
+    log "Could not open the Home screen: lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home kept failing"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 cleanup() {
     log "Stopping (signal/exit)"
+    buttons_stop
     ui_leave
+    if [ -f "${RUN_DIR}/buttons.exit" ]; then
+        rm -f "${RUN_DIR}/buttons.exit"
+        go_home
+    fi
     rm -f "${PIDFILE}"
     exit 0
 }
@@ -474,11 +728,13 @@ if [ -z "${TOKEN}" ] || [ "${TOKEN}" = "CHANGE-ME" ]; then
     say "kindledash: set TOKEN in config.sh"
 fi
 
-ui_enter
-say "kindledash starting..."
-
 CUR_PNG="${RUN_DIR}/current.png"
 TMP_PNG="${RUN_DIR}/next.png"
+rm -f "${RUN_DIR}/buttons.exit"
+ui_enter
+buttons_start
+say "kindledash starting..."
+
 # Start at the threshold so the very first frame is a full, flashing refresh
 # that clears whatever the Kindle UI left on the screen.
 frame="${FULL_REFRESH_EVERY}"
