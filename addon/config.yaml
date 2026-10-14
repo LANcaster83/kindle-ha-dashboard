@@ -1,6 +1,6 @@
 # https://developers.home-assistant.io/docs/apps/configuration
 name: Kindle Dashboard Renderer
-version: "0.2.1"
+version: "0.2.2"
 slug: kindledash
 description: Renders a Lovelace dashboard with headless Chromium into an e-ink friendly PNG for a jailbroken Kindle.
 url: https://github.com/LANcaster83/kindle-ha-dashboard/tree/main/addon

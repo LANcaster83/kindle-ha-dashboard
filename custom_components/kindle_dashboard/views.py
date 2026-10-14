@@ -76,8 +76,13 @@ class KindleImageView(HomeAssistantView):
             return self.json_message("Unauthorized", 401)
         runtime = entry.runtime_data
         fresh = request.query.get("render") == "1"
+        fb_rotate: int | None = None
+        if (raw := request.query.get("fb_rotate")) is not None:
+            if raw not in ("0", "1", "2", "3"):
+                return self.json_message("fb_rotate must be 0, 1, 2 or 3", 400)
+            fb_rotate = int(raw)
         try:
-            body, headers = await runtime.api.image(fresh=fresh)
+            body, headers = await runtime.api.image(fresh=fresh, fb_rotate=fb_rotate)
         except KindleDashApiError as err:
             _LOGGER.warning("Image fetch failed: %s", err)
             return self.json_message(str(err), 502)

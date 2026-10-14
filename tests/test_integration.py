@@ -95,6 +95,39 @@ async def test_views_require_device_token(
     assert (await client.post(f"{STATUS_PATH}?token={DEVICE_TOKEN}", data=b"not json")).status == 400
 
 
+async def test_image_proxy_forwards_rotation(
+    hass: HomeAssistant,
+    mock_entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    hass_client_no_auth: ClientSessionGenerator,
+) -> None:
+    """``fb_rotate`` and ``render`` reach the renderer; its rotation header comes back."""
+    await setup_entry(hass, mock_entry, aioclient_mock)
+    aioclient_mock.get(
+        f"{RENDERER_URL}/kindle.png",
+        content=PNG_BYTES,
+        headers={"Content-Type": "image/png", "X-Image-Size": "1x1", "X-Image-Rotation": "270"},
+    )
+    client = await hass_client_no_auth()
+
+    resp = await client.get(f"{IMAGE_PATH}?token={DEVICE_TOKEN}&fb_rotate=2")
+    assert resp.status == 200
+    assert resp.headers["X-Image-Rotation"] == "270"
+    upstream = aioclient_mock.mock_calls[-1][1]
+    assert upstream.path == "/kindle.png"
+    assert upstream.query == {"fb_rotate": "2"}
+
+    resp = await client.get(f"{IMAGE_PATH}?token={DEVICE_TOKEN}&render=1&fb_rotate=0")
+    assert resp.status == 200
+    assert aioclient_mock.mock_calls[-1][1].query == {"render": "1", "fb_rotate": "0"}
+
+    resp = await client.get(f"{IMAGE_PATH}?token={DEVICE_TOKEN}")
+    assert resp.status == 200
+    assert aioclient_mock.mock_calls[-1][1].query == {}
+
+    assert (await client.get(f"{IMAGE_PATH}?token={DEVICE_TOKEN}&fb_rotate=4")).status == 400
+
+
 async def test_views_accept_ha_auth(
     hass: HomeAssistant,
     mock_entry: MockConfigEntry,

@@ -3,8 +3,10 @@ import { PNG } from "pngjs";
 import {
   applyContrast,
   decodePng,
+  effectiveRotation,
   encodeGrayPng,
   grayPalette,
+  parseFbRotate,
   processScreenshot,
   quantise,
   rgbaToGray,
@@ -129,5 +131,37 @@ describe("processScreenshot", () => {
     const out = processScreenshot(src, { rotation: 90, contrast: 1, grayLevels: 16, dither: false });
     expect([out.width, out.height]).toEqual([2, 4]);
     expect(out.png[25]).toBe(0);
+    // The unrotated processed frame is kept for the other rotations.
+    expect([out.image.width, out.image.height]).toEqual([4, 2]);
+    expect(out.image.data[0]).toBe(0);
+  });
+});
+
+describe("effectiveRotation", () => {
+  it("counter-rotates the base rotation by the framebuffer rotation", () => {
+    // Upright framebuffer: the configured rotation as is.
+    expect(effectiveRotation(90, 0)).toBe(90);
+    expect(effectiveRotation(270, 0)).toBe(270);
+    // Upside-down framebuffer (Oasis flipped by the accelerometer): 180 degrees more.
+    expect(effectiveRotation(90, 2)).toBe(270);
+    expect(effectiveRotation(270, 2)).toBe(90);
+    expect(effectiveRotation(0, 2)).toBe(180);
+    expect(effectiveRotation(180, 2)).toBe(0);
+    // Landscape framebuffers.
+    expect(effectiveRotation(90, 1)).toBe(0);
+    expect(effectiveRotation(90, 3)).toBe(180);
+    expect(effectiveRotation(0, 1)).toBe(270);
+  });
+});
+
+describe("parseFbRotate", () => {
+  it("accepts 0..3, reports absence and garbage separately", () => {
+    expect(parseFbRotate(null)).toBeNull();
+    expect(parseFbRotate("0")).toBe(0);
+    expect(parseFbRotate("3")).toBe(3);
+    expect(parseFbRotate("4")).toBeUndefined();
+    expect(parseFbRotate("")).toBeUndefined();
+    expect(parseFbRotate("02")).toBeUndefined();
+    expect(parseFbRotate("x")).toBeUndefined();
   });
 });
