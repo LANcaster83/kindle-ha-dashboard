@@ -598,7 +598,8 @@ kill_recorded() {
     p="$(cat "${RUN_DIR}/$1" 2>/dev/null)"
     rm -f "${RUN_DIR}/$1"
     [ -n "${p}" ] || return 0
-    cmd="$(cat "/proc/${p}/cmdline" 2>/dev/null | tr '\0' ' ')"
+    # The group redirect also silences the shell when /proc/<pid> is already gone.
+    cmd="$({ tr '\0' ' ' <"/proc/${p}/cmdline"; } 2>/dev/null)"
     case "${cmd}" in
         "" | dd\ * | sleep\ * | *kindledash*) kill "${p}" 2>/dev/null ;;
     esac
