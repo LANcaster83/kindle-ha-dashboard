@@ -8,8 +8,9 @@ set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DAEMON="${HERE}/../extensions/kindledash/bin/kindledash.sh"
-BUSYBOX="${BUSYBOX:-busybox}"
-command -v "${BUSYBOX}" >/dev/null 2>&1 || { echo "busybox not found" >&2; exit 2; }
+# Absolute path: PATH is replaced below and must not contain the real system tools.
+BUSYBOX="$(command -v "${BUSYBOX:-busybox}" 2>/dev/null || true)"
+[ -n "${BUSYBOX}" ] || { echo "busybox not found" >&2; exit 2; }
 
 T="$(mktemp -d)"
 pid=""
@@ -27,7 +28,7 @@ mkdir -p "${FAKE}" "${BB}" "${EXT}" "${RUN}"
 
 # Every applet busybox offers, so the daemon runs on the same tools as on the Kindle.
 for applet in $("${BUSYBOX}" --list); do
-    ln -sf "$(command -v "${BUSYBOX}")" "${BB}/${applet}"
+    ln -sf "${BUSYBOX}" "${BB}/${applet}"
 done
 
 # --- fakes --------------------------------------------------------------------
