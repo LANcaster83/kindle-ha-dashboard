@@ -8,8 +8,8 @@ Copy `extensions/kindledash` to `/mnt/us/extensions/kindledash` on the Kindle
 kindledash/
 ├── config.xml        KUAL extension manifest
 ├── menu.json         KUAL menu entries (start / stop / fetch once / status)
-├── config.sh         your settings: server URL, token, interval, UI mode
-├── bin/kindledash.sh daemon: fetch PNG -> fbink -> sleep, battery reports
+├── config.sh         your settings: server URL, token, interval, UI mode, buttons
+├── bin/kindledash.sh daemon: fetch PNG -> fbink -> sleep, battery reports, button listener
 ├── bin/start.sh      background launcher used by KUAL
 ├── bin/stop.sh       stops the daemon and restores the UI
 ├── bin/status.sh     prints state + log tail on the screen
@@ -31,11 +31,33 @@ fetch, every drawn frame with its rotation, and warns on screen when the image
 would be cropped. `ORIENTATION_LOCK` in `config.sh` optionally sets
 `com.lab126.winmgr orientationLock` for the run (unverified on FW 5.16).
 
+Buttons: the daemon reads the Oasis page buttons from `/dev/input/eventN`
+(key codes 104 upper / 109 lower, from KOReader's `device.lua`) with a
+background subshell doing `dd bs=16 count=1` + `od` per `input_event`, steps
+`com.lab126.powerd flIntensity` by `BUTTON_LIGHT_STEP`, shows `Light N/24`
+with fbink and redraws the frame a second later; both buttons held
+`BUTTON_HOLD_SECONDS` stop the daemon and open the Home screen
+(`lipc-set-prop com.lab126.appmgrd start app://com.lab126.booklet.home`, as
+KOReader's exit does). The device is found from the sysfs key bitmap
+(`/sys/class/input/eventN/device/capabilities/key`, 32-bit words, most
+significant first), else by a `gpio-keys`-like name, `BUTTON_DEVICE` overrides.
+No exclusive grab is possible from busybox sh (`EVIOCGRAB` is an ioctl), so in
+`keep` mode the framework sees the presses too; `stop_framework` is the mode
+where the buttons belong to the daemon. See the main README's
+[Buttons](../README.md#buttons-oasis-page-buttons) section.
+
 Tests: `kindle/test/dry-run.sh` runs the daemon under `busybox sh` with fake
 `fbink`, `curl` and `lipc-*` tools (no device needed) and checks the
 `fb_rotate` it sends for `rota=0`, `2` and unknown, the mid-interval re-fetch
 when the rotation flips, the `STOP` file, SIGTERM and the orientation lock
-restore. CI runs it next to shellcheck.
+restore. For the buttons it builds a fake `/sys/class/input` (a touchscreen and
+a `gpio-keys` device with keys 104/109/116 in its bitmap) and feeds 16-byte
+`input_event` records (32-bit ARM layout: `tv_sec`, `tv_usec`, `type`, `code`,
+`value`, little endian) through a FIFO standing in for `/dev/input/event1`:
+detection, light up/down, clamping at 24, an unmapped key, a short double
+press (cancelled) and the held exit (daemon gone, Home screen call, no `dd`
+reader left), plus the `BUTTON_DEVICE` override and a missing device. CI runs
+it next to shellcheck.
 
 ## fbink
 
@@ -61,7 +83,9 @@ toolchain (`make kindle`, image support is on by default) and drop it in `bin/`.
 
 ## Stopping a `stop_framework` run
 
-With the Kindle GUI stopped there is no KUAL. Either create an empty file named
-`STOP` in this extension's folder over USB and eject (the daemon checks for it
-every `INTERVAL` seconds and runs `start lab126_gui`), run `bin/stop.sh` over
-SSH, or restart the device (hold the power button ~40 s).
+With the Kindle GUI stopped there is no KUAL. Hold both page buttons for a
+second (the daemon restores the GUI and opens the Home screen), or create an
+empty file named `STOP` in this extension's folder over USB and eject (the
+daemon checks for it every `ROTATION_POLL` seconds and runs `start
+lab126_gui`), run `bin/stop.sh` over SSH, or restart the device (hold the
+power button ~40 s).

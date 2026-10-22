@@ -213,8 +213,8 @@ KUAL → **Kindle Dashboard**:
 |-------|--------------|
 | *Fetch once (test)* | Downloads one frame and draws it. Use this first. |
 | *Start dashboard* | Loop in `keep` mode: Kindle UI stays alive, screensaver and Wi-Fi sleep disabled. *Stop dashboard* from KUAL works. The Kindle status bar clock may redraw over the top of the image until the next frame. |
-| *Start dashboard (stop framework)* | Stops the whole Kindle GUI (`stop lab126_gui`): least RAM/CPU, nothing redraws over the image. KUAL is gone with it, so to stop: connect USB, create an empty file `STOP` in `extensions/kindledash/`, eject; the daemon sees it within `INTERVAL` seconds and starts the GUI again. Or restart the Kindle (hold power ~40 s). |
-| *Stop dashboard* | Stops the loop, restores UI/screensaver. |
+| *Start dashboard (stop framework)* | Stops the whole Kindle GUI (`stop lab126_gui`): least RAM/CPU, nothing redraws over the image, the page buttons belong to the daemon alone. KUAL is gone with it, so to stop: **hold both page buttons for a second** (see [Buttons](#buttons-oasis-page-buttons)), or connect USB, create an empty file `STOP` in `extensions/kindledash/`, eject; the daemon sees it within `INTERVAL` seconds and starts the GUI again. Or restart the Kindle (hold power ~40 s). |
+| *Stop dashboard* | Stops the loop, restores UI/screensaver. Holding both page buttons does the same and opens the Home screen. |
 | *Show status / log* | Prints state, battery and the log tail on the screen. |
 
 The former *freeze UI* entry (KOReader's "disable pillow + `SIGSTOP awesome`"
@@ -234,6 +234,52 @@ the orientation state, the frame vs framebuffer geometry, every drawn frame
 with the framebuffer rotation it was fetched for, and every failed
 `fbink`/`eips`/`lipc-set-prop` call with its exit code and stderr. "Fetch once OK" without a "Drew" line before it never happens any more:
 a fetched-but-not-drawn frame is reported as such on screen and in the log.
+
+### Buttons (Oasis page buttons)
+
+Since extension 0.3.0 the daemon reads the two page buttons (Linux input
+events, `gpio-keys`) and uses them for the front light. With the Kindle
+rotated so that the buttons are at the bottom (`rotation: 270` in the app):
+
+| Gesture | Effect |
+|---------|--------|
+| Right button (the upper one in portrait, key code 104) | Front light **+2** (`BUTTON_LIGHT_STEP`), `Light 12/24` shown at the bottom for a second, then the frame is redrawn. |
+| Left button (the lower one, key code 109) | Front light **−2**. Clamped to `LIGHT_MIN`–`LIGHT_MAX` (0–24 on the Oasis, `(max)`/`(min)` in the message). |
+| Both held for `BUTTON_HOLD_SECONDS` (1 s) | Stops the daemon exactly like *Stop dashboard* (UI and screensaver restored, `start lab126_gui` after a `stop_framework` run) and opens the Home screen. Releasing either button earlier cancels it. |
+
+Single presses act on release; a press of both never changes the light. The
+light is set through `lipc-set-prop com.lab126.powerd flIntensity`, the same
+property the Kindle's own slider uses, so the slider shows the new value.
+
+Everything is in `config.sh`: `BUTTONS=1` (0 disables the listener), the two
+key codes (swap them to swap the buttons), the step, the range, the hold time,
+the message time and `BUTTON_DEVICE` to force `/dev/input/eventN`. Without an
+override the daemon picks the input device whose sysfs key bitmap
+(`/sys/class/input/eventN/device/capabilities/key`) lists both codes, else the
+first one named like `gpio-keys`, and logs the choice together with every
+input device's name (`Buttons: /dev/input/event1 ("gpio-keys") reports keys
+104 and 109; input devices: event0="…" …`, then `Buttons: listening on …`).
+Every press and release is logged (`Buttons: key 104 (up) pressed`), so is
+each light change (`Light 10 -> 12/24 (key up)`), an unmapped key such as
+power (`key 116 pressed (not mapped)`), the cancelled or completed hold and
+the Home screen call.
+
+How it works: a background subshell of the daemon reads one 16-byte
+`input_event` at a time with `dd bs=16 count=1` (a blocking read, nothing
+buffered) and decodes it with `od`. busybox `sh` cannot `ioctl(EVIOCGRAB)`,
+so there is no exclusive grab: in `keep` mode the Kindle UI receives the same
+presses (the Home screen pages underneath the dashboard, which the redraw a
+second later covers again). In `stop_framework` mode nothing else listens and
+the buttons are the only way to leave besides the `STOP` file. The listener is
+started after the UI mode is applied and stopped first on every exit; *Stop
+dashboard* and `bin/stop.sh` also kill a leftover `dd` reader, so no reader
+survives the daemon.
+
+Buttons do nothing? Check `Show status / log` for the `Buttons:` lines: no
+`listening on` line means detection failed (the log lists the devices it saw;
+set `BUTTON_DEVICE`), presses without `Light` lines mean lipc could not read
+`flIntensity`, no `pressed` lines at all mean the wrong device (try the other
+`eventN` names from the list).
 
 ## Tuning: what worked on the Oasis 2
 
@@ -274,7 +320,7 @@ below; set 0.95 if the picture looks harsh.
 ## Configuration reference
 
 - App options: [addon/DOCS.md](addon/DOCS.md).
-- Kindle: [kindle/extensions/kindledash/config.sh](kindle/extensions/kindledash/config.sh) is self-documented.
+- Kindle: [kindle/extensions/kindledash/config.sh](kindle/extensions/kindledash/config.sh) is self-documented (server, timing, display, UI mode, buttons).
 - Integration: everything is in the config flow / *Configure* dialog.
 
 ## Local development (no HAOS needed)
@@ -325,6 +371,14 @@ with the accelerometer (`rota=0` vs `rota=2` in the log). Extension 0.2.2 with
 app 0.2.2 compensates on every fetch; make sure both are updated (`Tools:`
 line and `fb_rotate=` in the log, `version` in `/status`). If it is upside
 down *and* the log says `rota=0`, swap `rotation` 90 <-> 270 in the app.
+
+**Page buttons do nothing.** See [Buttons](#buttons-oasis-page-buttons): the
+log tail names the input device the daemon picked and every device it saw.
+Set `BUTTON_DEVICE="/dev/input/eventN"` to one of them, restart, and press
+again; the matching `Buttons: key N pressed` lines tell you the codes to put
+in `BUTTON_LIGHT_UP` / `BUTTON_LIGHT_DOWN`. In `keep` mode the Home screen
+pages underneath the dashboard on every press; use `stop_framework` for a
+wall display.
 
 **Most renders time out, only every ~10th frame reaches the Kindle.** The host
 is too small for headless Chromium: 2 vCPU / 2 GB was not enough, 4 vCPU / 4 GB
